@@ -1,4 +1,4 @@
-/* STUDIUM Vistoria | app de campo com fila offline, painel e exportação */
+/* STUDIUM Plataforma | vistoria em campo (offline), clientes e obras, usuários, módulos */
 (function () {
   "use strict";
   var CFG = window.CFG;
@@ -8,8 +8,8 @@
   var LIMITE_LEGENDA = 205;        // 3 linhas no relatório
 
   var S = {
-    sb: null, user: null, perfil: null, obras: [], obraId: null, regs: [], fila: [], edicoes: {},
-    minis: new Map(), aba: "regs", online: navigator.onLine, sincronizando: false, precisaLogin: false,
+    sb: null, user: null, perfil: null, obras: [], clientes: [], perfis: [], logos: {}, clienteSel: null, obraSel: null, menuAberto: false, obraId: null, regs: [], fila: [], edicoes: {},
+    minis: new Map(), aba: "inicio", online: navigator.onLine, sincronizando: false, precisaLogin: false,
     mes: new Date(), diaSel: null, msg: "", obraEdit: null, exportando: "", confirmar: null, carregou: false
   };
   var idb = null, pendRender = false, timerRefresh = null;
@@ -158,6 +158,8 @@
     c = await dbGet("cache", "obras"); if (c) S.obras = c.v;
     c = await dbGet("cache", "perfil"); if (c) S.perfil = c.v;
     c = await dbGet("cache", "regs"); if (c) S.regs = c.v;
+    c = await dbGet("cache", "clientes"); if (c) S.clientes = c.v;
+    c = await dbGet("cache", "perfis"); if (c) S.perfis = c.v;
     (await dbTodos("minis")).forEach(function (m) { S.minis.set(m.id, URL.createObjectURL(m.blob)); });
     var guardada = guardado("obra");
     S.obraId = (S.obras.some(function (o) { return o.id === guardada; }) ? guardada : (S.obras[0] && S.obras[0].id)) || null;
@@ -181,13 +183,18 @@
       var obras = await paginar(function () { return S.sb.from("obras").select("*").order("nome_exibicao"); });
       var perfil = await S.sb.from("perfis").select("*").eq("user_id", S.user.id).maybeSingle();
       var regs = await paginar(function () { return S.sb.from("registros").select("*").order("ts", { ascending: false }); });
-      S.obras = obras; S.perfil = perfil.data || S.perfil; S.regs = regs;
+      var clientes = await paginar(function () { return S.sb.from("clientes").select("*").order("razao_social"); });
+      var perfis = await paginar(function () { return S.sb.from("perfis").select("*").order("email"); });
+      S.obras = obras; S.perfil = perfil.data || S.perfil; S.regs = regs; S.clientes = clientes; S.perfis = perfis;
+      await dbPut("cache", { k: "clientes", v: clientes });
+      await dbPut("cache", { k: "perfis", v: perfis });
       await dbPut("cache", { k: "obras", v: obras });
       await dbPut("cache", { k: "perfil", v: S.perfil });
       await dbPut("cache", { k: "regs", v: regs });
       if (!S.obras.some(function (o) { return o.id === S.obraId; })) S.obraId = S.obras[0] ? S.obras[0].id : null;
       S.carregou = true;
       render();
+      carregarLogos().then(render);
       preencherMinis();
     } catch (e) { S.msg = "Não foi possível atualizar agora: " + msgErro(e); render(); }
   }
@@ -386,22 +393,63 @@
   }
 
   // ---------------------------------------------------------------- telas
+  // ---------------------------------------------------------------- estrutura (menu lateral)
+  var MENU = [
+    { sec: "PRINCIPAL", itens: [{ id: "inicio", rot: "Início" }] },
+    { sec: "VISTORIA", mod: "vistoria", itens: [{ id: "regs", rot: "Registros de campo" }, { id: "painel", rot: "Painel de vistorias" }, { id: "clientes", rot: "Clientes e obras" }] },
+    { sec: "MANUAL", mod: "manual", itens: [{ id: "manual", rot: "Manual de uso", breve: 1 }, { id: "plano", rot: "Plano de manutenção", breve: 1 }, { id: "memorial", rot: "Memorial de acabamentos", breve: 1 }, { id: "asbuilt", rot: "As built", breve: 1 }] },
+    { sec: "LAUDO", mod: "laudo", itens: [{ id: "laudo", rot: "Laudos", breve: 1 }] },
+    { sec: "SISTEMA", itens: [{ id: "usuarios", rot: "Usuários", admin: 1 }, { id: "conta", rot: "Conta" }] }
+  ];
+  var ROTAS_OBRA = { regs: 1, painel: 1 };
+  function temModulo(m) {
+    if (!m || !S.perfil) return true;
+    return S.perfil.papel === "admin" || (S.perfil.modulos || []).indexOf(m) >= 0;
+  }
+  function tituloDe(id) {
+    var t = "";
+    MENU.forEach(function (s) { s.itens.forEach(function (i) { if (i.id === id) t = i.rot; }); });
+    return t;
+  }
+  function irPara(id) {
+    S.aba = id; S.menuAberto = false; S.clienteSel = null; S.obraSel = null; S.msg = "";
+    try { history.replaceState(null, "", "#/" + id); } catch (e) { /* ignora */ }
+    render(); window.scrollTo(0, 0);
+  }
+  function lateral() {
+    var blocos = [];
+    MENU.forEach(function (sec) {
+      if (!temModulo(sec.mod)) return;
+      var itens = sec.itens.filter(function (i) { return !i.admin || ehAdmin(); });
+      if (!itens.length) return;
+      blocos.push(h("div", { class: "sec" }, sec.sec));
+      itens.forEach(function (i) {
+        blocos.push(h("button", { class: "item" + (S.aba === i.id ? " at" : ""), onclick: function () { irPara(i.id); } }, i.rot, i.breve ? h("span", { class: "breve" }, "em breve") : null));
+      });
+    });
+    return h("aside", { class: "lateral" + (S.menuAberto ? " aberta" : "") },
+      h("div", { class: "logo" }, "STUDIUM", h("small", {}, "Soluções em Engenharia")),
+      h("div", { class: "itens" }, blocos),
+      h("div", { class: "usuario" }, S.user ? S.user.email : "", h("br"), h("small", {}, S.perfil ? S.perfil.papel : "")));
+  }
   function cabecalho() {
-    var pend = S.fila.length;
+    var pend = S.fila.length, comObra = ROTAS_OBRA[S.aba];
     return h("header", {},
-      h("span", { class: "marca" }, "STUDIUM"),
-      h("select", {
+      h("button", { class: "hamb", "aria-label": "Menu", onclick: function () { S.menuAberto = !S.menuAberto; render(); } }, "☰"),
+      h("strong", { class: "tit" + (comObra ? " curto" : "") }, tituloDe(S.aba)),
+      comObra ? h("select", {
         "aria-label": "Obra", onchange: function (e) { S.obraId = e.target.value; guardado("obra", S.obraId); render(); }
-      }, S.obras.map(function (o) { return h("option", { value: o.id, selected: o.id === S.obraId ? "" : null }, o.nome_exibicao); })),
+      }, S.obras.filter(function (o) { return o.ativa !== false || o.id === S.obraId; }).map(function (o) { return h("option", { value: o.id, selected: o.id === S.obraId ? "" : null }, o.nome_exibicao); })) : h("span", { class: "esp" }),
       h("span", { class: "pill " + (S.online ? "on" : "off") }, (S.online ? "Online" : "Offline") + (pend ? " · " + pend + " a enviar" : "")));
   }
   function navegacao() {
-    var abas = [["regs", "Registros"], ["painel", "Painel"]];
-    if (ehAdmin()) abas.push(["obras", "Obras"]);
-    abas.push(["conta", "Conta"]);
-    return h("nav", {}, abas.map(function (a) {
-      return h("button", { class: S.aba === a[0] ? "at" : "", onclick: function () { S.aba = a[0]; render(); window.scrollTo(0, 0); } }, a[1]);
+    var abas = [];
+    if (temModulo("vistoria")) abas.push(["regs", "Registros"], ["painel", "Painel"]); else abas.push(["inicio", "Início"]);
+    var nav = h("nav", {}, abas.map(function (a) {
+      return h("button", { class: S.aba === a[0] ? "at" : "", onclick: function () { irPara(a[0]); } }, a[1]);
     }));
+    nav.append(h("button", { class: S.menuAberto ? "at" : "", onclick: function () { S.menuAberto = !S.menuAberto; render(); } }, "Menu"));
+    return nav;
   }
 
   function cartaoRegistro(it) {
@@ -503,62 +551,225 @@
         h("p", { class: "mut" }, total + " fotos, cerca de " + Math.round(usado) + " MB de 1024 MB (estimativa). Depois de gerar o relatório do mês, baixe o pacote, guarde no Drive e peça para a administradora apagar as fotos antigas.")));
   }
 
-  var CAMPOS_OBRA = [
-    ["nome_exibicao", "Nome na capa (ex.: COLISEU RESIDENCE)", "text"], ["nome_no_texto", "Nome nas frases (ex.: Coliseu Residence)", "text"],
-    ["titulo_relatorio", "Título do relatório", "text"], ["cliente", "Cliente", "text"], ["objetivo", "Objetivo da vistoria", "textarea"],
-    ["localizacao", "Localização (endereço completo)", "textarea"], ["cidade_assinatura", "Cidade de assinatura", "text"],
-    ["legenda_mapa", "Legenda do mapa", "text"], ["texto_item3", "Texto de abertura do item 3 ({nome_no_texto} é substituído)", "textarea"],
-    ["numero_contrato", "Número do contrato", "text"]
-  ];
-  function telaObras() {
-    var ed = S.obraEdit || (obraAtual() ? Object.assign({}, obraAtual()) : null);
-    if (!ed) return h("main", {}, h("p", { class: "mut" }, "Nenhuma obra cadastrada."));
-    var novo = !!ed._novo, form = {};
-    var campos = CAMPOS_OBRA.map(function (c) {
-      var el = h(c[2] === "textarea" ? "textarea" : "input", c[2] === "textarea" ? { rows: 3, value: ed[c[0]] || "" } : { type: "text", value: ed[c[0]] || "" });
-      if (c[2] === "textarea") el.value = ed[c[0]] || "";
-      form[c[0]] = el;
-      return h("div", { class: "campo" }, h("label", {}, c[1]), el);
+  // ---------------------------------------------------------------- início (dashboard geral)
+  var LIMITE_DIAS = { semanal: 7, quinzenal: 15, mensal: 31 };
+  function telaInicio() {
+    var hoje = new Date(), hojeStr = diaDe(hoje), mesIni = diaDe(new Date(hoje.getFullYear(), hoje.getMonth(), 1));
+    var ativas = S.obras.filter(function (o) { return o.ativa !== false; }), linhas = [], diasMes = {};
+    ativas.forEach(function (o) {
+      var regs = S.regs.filter(function (r) { return r.obra_id === o.id; }), dias = {};
+      regs.forEach(function (r) { dias[r.dia] = 1; if (r.dia >= mesIni) diasMes[o.id + r.dia] = 1; });
+      var ult = Object.keys(dias).sort().pop(), sem = ult ? Math.floor((parseDia(hojeStr) - parseDia(ult)) / 86400000) : null;
+      var lim = LIMITE_DIAS[o.periodicidade], estado = "ok", txt = "Em dia";
+      if (!ult) { estado = "fal"; txt = "Sem registros"; }
+      else if (lim && sem > lim) { estado = "fal"; txt = "Atrasada"; }
+      else if (lim && sem > lim * 0.8) { estado = "pen"; txt = "Atenção"; }
+      else if (!lim) { estado = "pen"; txt = "Sem periodicidade"; }
+      var cli = S.clientes.find(function (c) { return c.id === o.cliente_id; });
+      linhas.push({ o: o, cli: cli ? cli.razao_social : (o.cliente || "-"), ult: ult, sem: sem, fotos: regs.length, estado: estado, txt: txt });
     });
-    var idEl = h("input", { type: "text", value: ed.id || "", placeholder: "ex.: liv (sem espaços ou acentos)" });
-    if (!novo) idEl.setAttribute("disabled", "");
-    var capa = h("input", { type: "file", accept: "image/jpeg,image/png" }), mapa = h("input", { type: "file", accept: "image/jpeg,image/png" });
-    async function enviarImg(file, id, nome) {
-      var ext = file.type === "image/png" ? ".png" : ".jpg", cam = "obras/" + id + "/" + nome + ext;
-      await S.sb.storage.from("fotos").remove([cam]);
-      var r = await S.sb.storage.from("fotos").upload(cam, file, { contentType: file.type, upsert: false });
-      if (r.error) throw r.error;
-      return cam;
+    linhas.sort(function (a, b) { var p = { fal: 0, pen: 1, ok: 2 }; return p[a.estado] - p[b.estado] || (b.sem || 0) - (a.sem || 0); });
+    var emDia = linhas.filter(function (l) { return l.estado === "ok"; }).length, atras = linhas.filter(function (l) { return l.estado === "fal"; }).length;
+    var cards = [];
+    if (temModulo("vistoria")) {
+      cards.push(
+        h("div", { class: "grade g4" },
+          h("div", { class: "cartao" }, h("div", { class: "num" }, String(ativas.length)), h("div", { class: "mut" }, "obras ativas")),
+          h("div", { class: "cartao" }, h("div", { class: "num" }, String(Object.keys(diasMes).length)), h("div", { class: "mut" }, "vistorias no mês (obra x dia)")),
+          h("div", { class: "cartao" }, h("div", { class: "num", style: atras ? "color:var(--err)" : "" }, String(atras)), h("div", { class: "mut" }, "obras atrasadas ou sem registro")),
+          h("div", { class: "cartao" }, h("div", { class: "num" }, String(S.fila.length)), h("div", { class: "mut" }, "fotos pendentes de envio"))),
+        h("div", { class: "cartao" },
+          h("h2", {}, "Situação das obras"),
+          linhas.length ? h("div", { class: "tabela" },
+            h("div", { class: "tr th" }, h("span", {}, "Obra"), h("span", {}, "Última vistoria"), h("span", {}, "Fotos"), h("span", {}, "Situação")),
+            linhas.map(function (l) {
+              return h("div", { class: "tr", onclick: function () { S.obraId = l.o.id; guardado("obra", l.o.id); irPara("painel"); } },
+                h("span", {}, h("strong", {}, l.o.nome_exibicao), h("br"), h("small", { class: "mut" }, l.cli + (l.o.periodicidade ? " | " + l.o.periodicidade : ""))),
+                h("span", {}, l.ult ? ddmm(parseDia(l.ult)) + " (" + l.sem + " d)" : "-"),
+                h("span", {}, String(l.fotos)),
+                h("span", {}, h("span", { class: "tag " + (l.estado === "ok" ? "env" : l.estado === "pen" ? "pen" : "fal") }, l.txt)));
+            })) : h("p", { class: "mut" }, "Nenhuma obra ativa. Cadastre em Vistoria, Clientes e obras."),
+          h("p", { class: "mut" }, "O alerta usa a periodicidade cadastrada em cada obra (semanal, quinzenal ou mensal). Obras sem periodicidade ficam em atenção."),
+          emDia ? null : null));
     }
+    var breves = [];
+    MENU.forEach(function (s) {
+      if (s.sec === "MANUAL" || s.sec === "LAUDO") if (temModulo(s.mod)) breves.push(h("div", { class: "cartao" }, h("h2", {}, s.sec), h("p", { class: "mut" }, s.itens.map(function (i) { return i.rot; }).join(", ")), h("span", { class: "tag pen" }, "em desenvolvimento")));
+    });
+    return h("main", {}, S.msg ? h("div", { class: "aviso" }, S.msg) : null, cards, breves.length ? h("div", { class: "grade g3" }, breves) : null);
+  }
+  function telaEmBreve(id) {
+    return h("main", {}, h("div", { class: "cartao" }, h("h2", {}, tituloDe(id)),
+      h("p", {}, "Módulo em definição. Ele será desenvolvido depois que a metodologia e o modelo de documento forem fornecidos pela engenharia."),
+      h("p", { class: "mut" }, "A estrutura de acesso, o login e o banco de dados já estão prontos e serão reaproveitados.")));
+  }
+
+  // ---------------------------------------------------------------- clientes e obras
+  var DEF_CLIENTE = [
+    ["razao_social", "Razão social", "text", 1], ["documento", "CNPJ ou CPF", "text"], ["contato_nome", "Contato (nome)", "text"],
+    ["contato_email", "E-mail do contato", "email"], ["contato_telefone", "Telefone do contato", "text"]
+  ];
+  var DEF_OBRA = [
+    ["nome_exibicao", "Nome da obra na capa (ex.: COLISEU RESIDENCE)", "text", 1], ["nome_no_texto", "Nome da obra nas frases (ex.: Coliseu Residence)", "text", 1],
+    ["titulo_relatorio", "Título do relatório", "text", 1], ["localizacao", "Endereço completo da obra", "textarea", 1],
+    ["cidade_assinatura", "Cidade de assinatura", "text"], ["numero_contrato", "Número do contrato", "text"],
+    ["escopo", "Escopo contratado", "textarea"], ["periodicidade", "Periodicidade das vistorias", "select", 0, ["semanal", "quinzenal", "mensal", "sob demanda"]],
+    ["objetivo", "Objetivo da vistoria (item 1 do relatório)", "textarea"], ["legenda_mapa", "Legenda do mapa (Figura 1)", "text"],
+    ["texto_item3", "Texto de abertura do item 3 ({nome_no_texto} é substituído)", "textarea"]
+  ];
+  function slug(t) { return (t || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "obra"; }
+  function campoForm(def, valor) {
+    var el;
+    if (def[2] === "textarea") { el = h("textarea", { rows: 3 }); el.value = valor || ""; }
+    else if (def[2] === "select") {
+      el = h("select", {}, [h("option", { value: "" }, "Selecione")].concat(def[4].map(function (o) { return h("option", { value: o }, o); })));
+      el.value = valor || "";
+    } else { el = h("input", { type: def[2] || "text" }); el.value = valor || ""; }
+    el.setAttribute("data-f", def[0]);
+    return { el: el, bloco: h("div", { class: "campo" }, h("label", {}, def[1] + (def[3] ? " *" : "")), el) };
+  }
+  function montarForm(defs, valores) {
+    var m = {}, blocos = defs.map(function (d) { var c = campoForm(d, valores[d[0]]); m[d[0]] = c.el; return c.bloco; });
+    return { blocos: blocos, ler: function () { var r = {}; defs.forEach(function (d) { r[d[0]] = m[d[0]].value.trim(); }); return r; } };
+  }
+  async function enviarArquivo(file, caminho) {
+    await S.sb.storage.from("fotos").remove([caminho]);
+    var r = await S.sb.storage.from("fotos").upload(caminho, file, { contentType: file.type, upsert: false });
+    if (r.error) throw r.error;
+    return caminho;
+  }
+  function extDe(file) { return file.type === "image/png" ? ".png" : ".jpg"; }
+  async function carregarLogos() {
+    var caminhos = S.clientes.filter(function (c) { return c.logo_path && !S.logos[c.logo_path]; }).map(function (c) { return c.logo_path; });
+    if (!caminhos.length || !S.online || !S.sb) return;
+    var r = await S.sb.storage.from("fotos").createSignedUrls(caminhos, 3600);
+    if (r.data) r.data.forEach(function (x) { if (x.signedUrl) S.logos[x.path] = x.signedUrl; });
+  }
+  function exigeOnline() {
+    if (S.online) return false;
+    S.msg = "Cadastros precisam de internet. Conecte-se e tente novamente."; render(); return true;
+  }
+
+  function telaClientes() {
+    if (S.obraSel) return telaObra();
+    if (S.clienteSel) return telaCliente();
+    var lista = S.clientes.slice().sort(function (a, b) { return a.razao_social.localeCompare(b.razao_social); });
+    return h("main", {},
+      S.msg ? h("div", { class: "aviso" }, S.msg) : null,
+      h("div", { class: "linha" }, h("h2", {}, "Clientes de vistoria"), h("button", { class: "bt pe", style: "flex:0 0 auto", onclick: function () { S.clienteSel = "novo"; S.msg = ""; render(); } }, "Novo cliente")),
+      lista.length ? lista.map(function (c) {
+        var obras = S.obras.filter(function (o) { return o.cliente_id === c.id; });
+        return h("div", { class: "cartao cli", onclick: function () { S.clienteSel = c.id; S.msg = ""; render(); } },
+          S.logos[c.logo_path] ? h("img", { class: "logo-c", src: S.logos[c.logo_path], alt: "" }) : h("div", { class: "logo-c ini" }, c.razao_social.slice(0, 1)),
+          h("div", {}, h("strong", {}, c.razao_social), h("div", { class: "mut" }, [c.documento, c.contato_nome].filter(Boolean).join(" | ")),
+            h("div", { class: "mut" }, obras.length + (obras.length === 1 ? " obra" : " obras") + (obras.length ? ": " + obras.map(function (o) { return o.nome_exibicao; }).join(", ") : ""))));
+      }) : h("p", { class: "mut" }, "Nenhum cliente cadastrado."));
+  }
+
+  function telaCliente() {
+    var novo = S.clienteSel === "novo", c = novo ? {} : (S.clientes.find(function (x) { return x.id === S.clienteSel; }) || {});
+    var form = montarForm(DEF_CLIENTE, c), logo = h("input", { type: "file", accept: "image/png,image/jpeg" });
     async function salvar() {
-      if (!S.online) { S.msg = "Salvar a obra precisa de internet."; render(); return; }
-      var reg = {};
-      CAMPOS_OBRA.forEach(function (c) { reg[c[0]] = form[c[0]].value.trim(); });
-      var id = novo ? idEl.value.trim().toLowerCase() : ed.id;
-      if (!/^[a-z0-9-]+$/.test(id)) { S.msg = "Use no id apenas letras minúsculas, números e hífen."; render(); return; }
-      if (!reg.nome_exibicao || !reg.cliente) { S.msg = "Preencha pelo menos o nome na capa e o cliente."; render(); return; }
-      reg.id = id; reg.numero_contrato = reg.numero_contrato || null;
+      if (exigeOnline()) return;
+      var reg = form.ler();
+      if (!reg.razao_social) { S.msg = "Informe a razão social."; render(); return; }
       try {
-        if (capa.files[0]) reg.imagem_capa = await enviarImg(capa.files[0], id, "capa");
-        if (mapa.files[0]) reg.imagem_mapa = await enviarImg(mapa.files[0], id, "mapa");
+        var id = novo ? novoId() : c.id;
+        var r = novo ? await S.sb.from("clientes").insert(Object.assign({ id: id }, reg)) : await S.sb.from("clientes").update(reg).eq("id", id);
+        if (r.error) throw r.error;
+        if (logo.files[0]) {
+          var cam = await enviarArquivo(logo.files[0], "clientes/" + id + "/logo" + extDe(logo.files[0]));
+          var u = await S.sb.from("clientes").update({ logo_path: cam }).eq("id", id);
+          if (u.error) throw u.error;
+        }
+        if (!novo) await S.sb.from("obras").update({ cliente: reg.razao_social.toUpperCase() }).eq("cliente_id", id);
+        S.clienteSel = id; S.msg = "Cliente salvo.";
+        await carregarNuvem(); await carregarLogos();
+      } catch (e) { S.msg = "Erro ao salvar: " + msgErro(e); }
+      render();
+    }
+    var obras = novo ? [] : S.obras.filter(function (o) { return o.cliente_id === c.id; });
+    return h("main", {},
+      S.msg ? h("div", { class: "aviso" }, S.msg) : null,
+      h("button", { class: "bt sec pe", onclick: function () { S.clienteSel = null; S.msg = ""; render(); } }, "‹ Voltar aos clientes"),
+      h("div", { class: "cartao" },
+        h("h2", {}, novo ? "Novo cliente" : "Cliente"),
+        form.blocos,
+        h("div", { class: "campo" }, h("label", {}, "Logo do cliente (PNG ou JPG, opcional" + (c.logo_path ? "; já enviada, escolha outra para trocar" : "") + ")"), logo),
+        S.logos[c.logo_path] ? h("img", { class: "logo-prev", src: S.logos[c.logo_path], alt: "Logo" }) : null,
+        h("button", { class: "bt", onclick: salvar }, "Salvar cliente")),
+      novo ? h("p", { class: "mut" }, "Salve o cliente para cadastrar as obras dele.") : h("div", { class: "cartao" },
+        h("div", { class: "linha" }, h("h2", {}, "Obras deste cliente"), h("button", { class: "bt pe", style: "flex:0 0 auto", onclick: function () { S.obraSel = "nova"; S.msg = ""; render(); } }, "Nova obra")),
+        obras.length ? obras.map(function (o) {
+          return h("div", { class: "cli", onclick: function () { S.obraSel = o.id; S.msg = ""; render(); } },
+            h("div", {}, h("strong", {}, o.nome_exibicao), h("div", { class: "mut" }, [o.numero_contrato ? "Contrato " + o.numero_contrato : "", o.periodicidade, o.ativa === false ? "inativa" : ""].filter(Boolean).join(" | "))));
+        }) : h("p", { class: "mut" }, "Nenhuma obra cadastrada para este cliente.")));
+  }
+
+  function telaObra() {
+    var novo = S.obraSel === "nova", cli = S.clientes.find(function (x) { return x.id === S.clienteSel; }) || {};
+    var o = novo ? { titulo_relatorio: "RELATÓRIO DE FISCALIZAÇÃO DE OBRA", legenda_mapa: "Figura 1: Localização da edificação objeto da vistoria.", cidade_assinatura: "", ativa: true,
+      texto_item3: "O presente relatório tem por objetivo acompanhar e documentar, por meio de inspeção visual e registro fotográfico, os serviços em execução no {nome_no_texto}, ", objetivo: "Fiscalização da obra." } : (S.obras.find(function (x) { return x.id === S.obraSel; }) || {});
+    var form = montarForm(DEF_OBRA, o), capa = h("input", { type: "file", accept: "image/jpeg,image/png" }), mapa = h("input", { type: "file", accept: "image/jpeg,image/png" });
+    var ativa = h("input", { type: "checkbox", "data-f": "ativa" }); ativa.checked = o.ativa !== false;
+    async function salvar() {
+      if (exigeOnline()) return;
+      var reg = form.ler();
+      if (!reg.nome_exibicao || !reg.nome_no_texto || !reg.titulo_relatorio || !reg.localizacao) { S.msg = "Preencha os campos obrigatórios (*)."; render(); return; }
+      reg.numero_contrato = reg.numero_contrato || null; reg.escopo = reg.escopo || null; reg.periodicidade = reg.periodicidade || null;
+      reg.ativa = ativa.checked; reg.cliente_id = cli.id; reg.cliente = (cli.razao_social || "").toUpperCase();
+      reg.cidade_assinatura = reg.cidade_assinatura || "";
+      try {
+        var id = o.id;
+        if (novo) { id = slug(reg.nome_exibicao); var base = id, n = 2; while (S.obras.some(function (x) { return x.id === id; })) id = base + "-" + (n++); }
+        reg.id = id;
+        if (capa.files[0]) reg.imagem_capa = await enviarArquivo(capa.files[0], "obras/" + id + "/capa" + extDe(capa.files[0]));
+        if (mapa.files[0]) reg.imagem_mapa = await enviarArquivo(mapa.files[0], "obras/" + id + "/mapa" + extDe(mapa.files[0]));
         var r = novo ? await S.sb.from("obras").insert(reg) : await S.sb.from("obras").update(reg).eq("id", id);
         if (r.error) throw r.error;
-        S.obraEdit = null; S.obraId = id; guardado("obra", id); S.msg = "Obra salva.";
+        S.obraSel = id; S.obraId = id; guardado("obra", id); S.msg = "Obra salva.";
         await carregarNuvem();
       } catch (e) { S.msg = "Erro ao salvar: " + msgErro(e); }
       render();
     }
     return h("main", {},
       S.msg ? h("div", { class: "aviso" }, S.msg) : null,
-      h("div", { class: "linha" },
-        h("button", { class: "bt sec pe", onclick: function () { S.obraEdit = null; render(); } }, "Editar a obra selecionada"),
-        h("button", { class: "bt sec pe", onclick: function () { S.obraEdit = { _novo: true, titulo_relatorio: "RELATÓRIO DE FISCALIZAÇÃO DE OBRA", legenda_mapa: "Figura 1: Localização da edificação objeto da vistoria.", texto_item3: "O presente relatório tem por objetivo acompanhar e documentar, por meio de inspeção visual e registro fotográfico, ... {nome_no_texto}, " }; render(); } }, "Nova obra")),
+      h("button", { class: "bt sec pe", onclick: function () { S.obraSel = null; S.msg = ""; render(); } }, "‹ Voltar ao cliente"),
       h("div", { class: "cartao" },
-        h("h2", {}, novo ? "Nova obra" : "Cadastro: " + ed.nome_exibicao),
-        h("div", { class: "campo" }, h("label", {}, "Código da obra (não muda depois)"), idEl), campos,
-        h("div", { class: "campo" }, h("label", {}, "Imagem de capa (opcional; atual: " + (ed.imagem_capa ? "enviada" : "padrão") + ")"), capa),
-        h("div", { class: "campo" }, h("label", {}, "Mapa de localização, Figura 1 (atual: " + (ed.imagem_mapa ? "enviado" : "nenhum") + ")"), mapa),
+        h("h2", {}, (novo ? "Nova obra" : "Obra") + " | " + (cli.razao_social || "")),
+        form.blocos,
+        h("div", { class: "campo" }, h("label", { class: "chk" }, ativa, "Obra ativa (aparece no app de campo e no painel)")),
+        h("div", { class: "campo" }, h("label", {}, "Imagem de capa do relatório (opcional; atual: " + (o.imagem_capa ? "enviada" : "padrão") + ")"), capa),
+        h("div", { class: "campo" }, h("label", {}, "Mapa de localização, Figura 1 (atual: " + (o.imagem_mapa ? "enviado" : "nenhum") + ")"), mapa),
         h("button", { class: "bt", onclick: salvar }, "Salvar obra")));
+  }
+
+  // ---------------------------------------------------------------- usuários
+  function telaUsuarios() {
+    var MODS = [["vistoria", "Vistoria"], ["manual", "Manual"], ["laudo", "Laudo"]];
+    var linhas = S.perfis.slice().sort(function (a, b) { return (a.email || "").localeCompare(b.email || ""); }).map(function (p) {
+      var eu = S.user && p.user_id === S.user.id;
+      var nome = h("input", { type: "text", placeholder: "Nome" }); nome.value = p.nome || "";
+      var papel = h("select", {}, h("option", { value: "equipe" }, "Equipe"), h("option", { value: "admin" }, "Administradora")); papel.value = p.papel;
+      var ativo = h("input", { type: "checkbox" }); ativo.checked = p.ativo !== false;
+      if (eu) { papel.setAttribute("disabled", ""); ativo.setAttribute("disabled", ""); }
+      var mods = MODS.map(function (m) { var c = h("input", { type: "checkbox" }); c.checked = (p.modulos || []).indexOf(m[0]) >= 0; c._m = m[0]; return c; });
+      return h("div", { class: "cartao" },
+        h("strong", {}, p.email || p.user_id), eu ? h("span", { class: "mut" }, " (você)") : null,
+        h("div", { class: "campo" }, h("label", {}, "Nome"), nome),
+        h("div", { class: "linha" }, h("div", { class: "campo" }, h("label", {}, "Perfil"), papel), h("label", { class: "chk" }, ativo, "Acesso ativo")),
+        h("div", { class: "chk-linha" }, mods.map(function (c, i) { return h("label", { class: "chk" }, c, MODS[i][1]); })),
+        h("p", { class: "mut" }, "Administradora vê todos os módulos. Para equipe, marque os módulos liberados."),
+        h("button", { class: "bt pe", onclick: async function () {
+          if (exigeOnline()) return;
+          var r = await S.sb.from("perfis").update({ nome: nome.value.trim() || null, papel: papel.value, ativo: ativo.checked, modulos: mods.filter(function (c) { return c.checked; }).map(function (c) { return c._m; }) }).eq("user_id", p.user_id);
+          S.msg = r.error ? "Erro ao salvar: " + msgErro(r.error) : "Usuário atualizado.";
+          await carregarNuvem(); render();
+        } }, "Salvar"));
+    });
+    return h("main", {}, S.msg ? h("div", { class: "aviso" }, S.msg) : null,
+      h("div", { class: "aviso" }, "Para incluir uma pessoa nova: no Supabase, Authentication, Users, Add user (com Auto Confirm). Ela aparece aqui automaticamente, e você define o perfil e os módulos."),
+      linhas);
   }
 
   function telaConta() {
@@ -595,19 +806,36 @@
 
   function render() {
     var a = document.activeElement;
-    if (a && /^(TEXTAREA|INPUT|SELECT)$/.test(a.tagName) && app.contains(a) && a.type !== "checkbox") { pendRender = true; return; }
+    if (a && /^(TEXTAREA|INPUT|SELECT)$/.test(a.tagName) && app.contains(a) && a.type !== "checkbox" && a.type !== "file") { pendRender = true; return; }
     pendRender = false;
-    var y = window.scrollY, tela;
+    var y = window.scrollY, tela, sig = S.aba + "|" + S.clienteSel + "|" + S.obraSel, rasc = null;
+    if (sig === S.sigAnt) {                       // mesma tela: não perde o que foi digitado
+      rasc = {};
+      app.querySelectorAll("[data-f]").forEach(function (e) { rasc[e.getAttribute("data-f")] = e.type === "checkbox" ? e.checked : e.value; });
+    }
+    S.sigAnt = sig;
     if (S.precisaLogin || !S.user) { app.replaceChildren(telaLogin()); return; }
-    tela = S.aba === "painel" ? telaPainel() : S.aba === "obras" && ehAdmin() ? telaObras() : S.aba === "conta" ? telaConta() : telaRegistros();
-    app.replaceChildren(cabecalho(), tela, navegacao());
+    var id = S.aba;
+    if (id === "inicio") tela = telaInicio();
+    else if (id === "painel" && temModulo("vistoria")) tela = telaPainel();
+    else if (id === "regs" && temModulo("vistoria")) tela = telaRegistros();
+    else if (id === "clientes" && temModulo("vistoria")) tela = telaClientes();
+    else if (id === "usuarios" && ehAdmin()) tela = telaUsuarios();
+    else if (id === "conta") tela = telaConta();
+    else if (MENU.some(function (s) { return s.itens.some(function (i) { return i.id === id && i.breve; }) && temModulo(s.mod); })) tela = telaEmBreve(id);
+    else tela = telaInicio();
+    app.replaceChildren(h("div", { class: "shell" }, lateral(),
+      h("div", { class: "vel" + (S.menuAberto ? " on" : ""), onclick: function () { S.menuAberto = false; render(); } }),
+      h("div", { class: "conteudo" }, cabecalho(), tela, navegacao())));
     window.scrollTo(0, y);
   }
-  document.addEventListener("focusout", function () { setTimeout(function () { if (pendRender) render(); }, 150); });
+    document.addEventListener("focusout", function () { setTimeout(function () { if (pendRender) render(); }, 150); });
 
   // ---------------------------------------------------------------- início
   async function iniciar() {
     await carregarLocal();
+    var hsh = (location.hash || "").replace("#/", "");
+    if (hsh && tituloDe(hsh)) S.aba = hsh;
     render();
     if (S.online) { await carregarNuvem(); sincronizar(); assinar(); }
   }
