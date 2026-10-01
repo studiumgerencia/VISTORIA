@@ -6,11 +6,14 @@
   var MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
   var MB_POR_FOTO = 0.6;           // estimativa para o medidor do plano gratuito (1 GB)
   var LIMITE_LEGENDA = 205;        // 3 linhas no relatório
+  var CAMPOS_TEC = ["sistema", "diagnostico", "orientacao"];   // campos opcionais por foto (script SQL 04)
+  var SISTEMAS_BASE = ["Impermeabilização", "Revestimentos", "Estrutura", "Esquadrias", "Instalações", "Drenagem", "Pintura", "Canteiro de obras"];
 
   var S = {
     sb: null, user: null, perfil: null, obras: [], clientes: [], perfis: [], logos: {}, clienteSel: null, obraSel: null, menuAberto: false, obraId: null, regs: [], fila: [], edicoes: {},
     minis: new Map(), aba: "inicio", online: navigator.onLine, sincronizando: false, precisaLogin: false,
-    mes: new Date(), diaSel: null, msg: "", obraEdit: null, exportando: "", confirmar: null, carregou: false
+    mes: new Date(), diaSel: null, msg: "", obraEdit: null, exportando: "", confirmar: null, carregou: false,
+    modelos: [], relatorios: [], semScript04: false, rel: null
   };
   var idb = null, pendRender = false, timerRefresh = null;
   var app = document.getElementById("app");
@@ -160,6 +163,8 @@
     c = await dbGet("cache", "regs"); if (c) S.regs = c.v;
     c = await dbGet("cache", "clientes"); if (c) S.clientes = c.v;
     c = await dbGet("cache", "perfis"); if (c) S.perfis = c.v;
+    c = await dbGet("cache", "modelos"); if (c) S.modelos = c.v;
+    c = await dbGet("cache", "relatorios"); if (c) S.relatorios = c.v;
     (await dbTodos("minis")).forEach(function (m) { S.minis.set(m.id, URL.createObjectURL(m.blob)); });
     var guardada = guardado("obra");
     S.obraId = (S.obras.some(function (o) { return o.id === guardada; }) ? guardada : (S.obras[0] && S.obras[0].id)) || null;
@@ -186,6 +191,13 @@
       var clientes = await paginar(function () { return S.sb.from("clientes").select("*").order("razao_social"); });
       var perfis = await paginar(function () { return S.sb.from("perfis").select("*").order("email"); });
       S.obras = obras; S.perfil = perfil.data || S.perfil; S.regs = regs; S.clientes = clientes; S.perfis = perfis;
+      try {
+        S.modelos = await paginar(function () { return S.sb.from("modelos_relatorio").select("*").order("criado_em"); });
+        S.relatorios = await paginar(function () { return S.sb.from("relatorios").select("*").order("atualizado_em", { ascending: false }); });
+        S.semScript04 = false;
+        await dbPut("cache", { k: "modelos", v: S.modelos });
+        await dbPut("cache", { k: "relatorios", v: S.relatorios });
+      } catch (e2) { S.semScript04 = true; }
       await dbPut("cache", { k: "clientes", v: clientes });
       await dbPut("cache", { k: "perfis", v: perfis });
       await dbPut("cache", { k: "obras", v: obras });
@@ -219,6 +231,19 @@
   }
 
   // ---------------------------------------------------------------- sincronização
+  function colunaAusente(e) { return !!e && (e.code === "PGRST204" || e.code === "42703" || /schema cache|column/i.test(e.message || "")); }
+  // grava campos de um registro; se o script 04 ainda não foi rodado, grava só os campos antigos
+  async function gravarCampos(id, campos) {
+    var r = await S.sb.from("registros").update(campos).eq("id", id);
+    if (r.error && colunaAusente(r.error)) {
+      S.semScript04 = true;
+      var basicos = {}, n = 0;
+      Object.keys(campos).forEach(function (k) { if (CAMPOS_TEC.indexOf(k) < 0) { basicos[k] = campos[k]; n++; } });
+      if (!n) return { error: r.error };
+      r = await S.sb.from("registros").update(basicos).eq("id", id);
+    }
+    return r;
+  }
   async function subir(caminho, blob) {
     var r = await S.sb.storage.from("fotos").upload(caminho, blob, { contentType: "image/jpeg", upsert: false });
     if (r.error && !(String(r.error.statusCode) === "409" || /exists|Duplicate/i.test(r.error.message || ""))) throw r.error;
@@ -227,10 +252,14 @@
     var cam = it.obra_id + "/" + it.dia + "/" + it.id + ".jpg";
     await subir(cam, it.blob);
     await subir(caminhoMini(cam), it.thumb);
-    var r = await S.sb.from("registros").insert({
+    var linha = {
       id: it.id, obra_id: it.obra_id, dia: it.dia, ts: it.ts, semana: it.semana, local: it.local || "",
       legenda: it.legenda || "", entra: it.entra !== false, foto_path: cam, w: it.w, h: it.h
-    });
+    };
+    var extras = {}, temExtra = false;
+    CAMPOS_TEC.forEach(function (c) { if (it[c]) { extras[c] = it[c]; temExtra = true; } });
+    var r = await S.sb.from("registros").insert(temExtra ? Object.assign({}, linha, extras) : linha);
+    if (r.error && temExtra && colunaAusente(r.error)) { S.semScript04 = true; r = await S.sb.from("registros").insert(linha); }
     if (r.error && r.error.code !== "23505") throw r.error;
   }
   async function sincronizar(manual) {
@@ -255,7 +284,7 @@
       }
       var eds = await dbTodos("edicoes");
       for (var j = 0; j < eds.length; j++) {
-        var r = await S.sb.from("registros").update(eds[j].campos).eq("id", eds[j].id);
+        var r = await gravarCampos(eds[j].id, eds[j].campos);
         if (!r.error) { await dbDel("edicoes", eds[j].id); delete S.edicoes[eds[j].id]; }
       }
       S.msg = "";
@@ -276,7 +305,7 @@
         var f = await processar(arqs[i]), dia = diaDe(f.data);
         var item = {
           id: novoId(), obra_id: S.obraId, dia: dia, ts: f.data.toISOString(), semana: diaDe(segundaDe(dia)),
-          local: guardado("local") || "", legenda: "", entra: true, blob: f.blob, thumb: f.thumb, w: f.w, h: f.h, estado: "pendente"
+          local: guardado("local") || "", legenda: "", sistema: guardado("sistema") || "", diagnostico: "", orientacao: "", entra: true, blob: f.blob, thumb: f.thumb, w: f.w, h: f.h, estado: "pendente"
         };
         await dbPut("fila", item);
         S.fila.push(item);
@@ -298,7 +327,7 @@
       await dbPut("edicoes", ed);
       if (r) r[campo] = valor;
       if (S.online && S.sb) {
-        var u = await S.sb.from("registros").update(ed.campos).eq("id", it.id);
+        var u = await gravarCampos(it.id, ed.campos);
         if (!u.error) { await dbDel("edicoes", it.id); delete S.edicoes[it.id]; }
       }
     }
@@ -341,7 +370,7 @@
     setTimeout(function () { URL.revokeObjectURL(a.href); }, 60000);
   }
   function csvCel(v) { v = v == null ? "" : String(v); return '"' + v.replace(/"/g, '""') + '"'; }
-  async function exportar(de, ate) {
+  async function exportar(de, ate, rel) {
     var obra = obraAtual();
     if (!obra) return;
     if (!S.online) { S.msg = "A exportação precisa de internet."; render(); return; }
@@ -352,7 +381,7 @@
     var semanas = {};
     regs.forEach(function (r) { (semanas[r.semana] = semanas[r.semana] || []).push(r); });
     var chaves = Object.keys(semanas).sort();
-    var zip = new JSZip(), linhas = ["pasta;ordem;arquivo;dia;hora;local;legenda;entra_no_relatorio;obra"];
+    var zip = new JSZip(), linhas = ["pasta;ordem;arquivo;dia;hora;local;legenda;entra_no_relatorio;obra;sistema;diagnostico;orientacao"];
     var total = regs.filter(function (r) { return r.entra; }).length, feitas = 0;
     S.exportando = "Preparando..."; render();
     for (var i = 0; i < chaves.length; i++) {
@@ -373,11 +402,18 @@
       var ordem = 0;
       lista.forEach(function (r) {
         if (r._arq) ordem++;
-        linhas.push([pasta, r._arq ? ordem : "", r._arq || "", r.dia, hora(r.ts), r.local, r.legenda, r.entra ? "sim" : "nao", obra.id].map(csvCel).join(";"));
+        linhas.push([pasta, r._arq ? ordem : "", r._arq || "", r.dia, hora(r.ts), r.local, r.legenda, r.entra ? "sim" : "nao", obra.id, r.sistema || "", r.diagnostico || "", r.orientacao || ""].map(csvCel).join(";"));
       });
     }
     zip.file("registros.csv", "﻿" + linhas.join("\r\n"));
     zip.file("obra.json", JSON.stringify(obra, null, 2));
+    if (rel) {
+      var mdl = S.modelos.find(function (x) { return x.id === rel.modelo_id; }) || {};
+      zip.file("relatorio.json", JSON.stringify({
+        status: rel.status, modelo: mdl, tema: rel.tema, periodo_ini: rel.periodo_ini, periodo_fim: rel.periodo_fim,
+        usar_item4: rel.usar_item4, conteudo: rel.conteudo
+      }, null, 2));
+    }
     for (var q = 0; q < 2; q++) {
       var cam = q ? obra.imagem_mapa : obra.imagem_capa;
       if (!cam) continue;
@@ -396,12 +432,12 @@
   // ---------------------------------------------------------------- estrutura (menu lateral)
   var MENU = [
     { sec: "PRINCIPAL", itens: [{ id: "inicio", rot: "Início" }] },
-    { sec: "VISTORIA", mod: "vistoria", itens: [{ id: "regs", rot: "Registros de campo" }, { id: "painel", rot: "Painel de vistorias" }, { id: "clientes", rot: "Clientes e obras" }] },
+    { sec: "VISTORIA", mod: "vistoria", itens: [{ id: "regs", rot: "Registros de campo" }, { id: "painel", rot: "Painel de vistorias" }, { id: "relatorios", rot: "Relatórios" }, { id: "clientes", rot: "Clientes e obras" }] },
     { sec: "MANUAL", mod: "manual", itens: [{ id: "manual", rot: "Manual de uso", breve: 1 }, { id: "plano", rot: "Plano de manutenção", breve: 1 }, { id: "memorial", rot: "Memorial de acabamentos", breve: 1 }, { id: "asbuilt", rot: "As built", breve: 1 }] },
     { sec: "LAUDO", mod: "laudo", itens: [{ id: "laudo", rot: "Laudos", breve: 1 }] },
     { sec: "SISTEMA", itens: [{ id: "usuarios", rot: "Usuários", admin: 1 }, { id: "conta", rot: "Conta" }] }
   ];
-  var ROTAS_OBRA = { regs: 1, painel: 1 };
+  var ROTAS_OBRA = { regs: 1, painel: 1, relatorios: 1 };
   function temModulo(m) {
     if (!m || !S.perfil) return true;
     return S.perfil.papel === "admin" || (S.perfil.modulos || []).indexOf(m) >= 0;
@@ -438,7 +474,7 @@
       h("button", { class: "hamb", "aria-label": "Menu", onclick: function () { S.menuAberto = !S.menuAberto; render(); } }, "☰"),
       h("strong", { class: "tit" + (comObra ? " curto" : "") }, tituloDe(S.aba)),
       comObra ? h("select", {
-        "aria-label": "Obra", onchange: function (e) { S.obraId = e.target.value; guardado("obra", S.obraId); render(); }
+        "aria-label": "Obra", onchange: function (e) { S.obraId = e.target.value; guardado("obra", S.obraId); S.rel = null; render(); }
       }, S.obras.filter(function (o) { return o.ativa !== false || o.id === S.obraId; }).map(function (o) { return h("option", { value: o.id, selected: o.id === S.obraId ? "" : null }, o.nome_exibicao); })) : h("span", { class: "esp" }),
       h("span", { class: "pill " + (S.online ? "on" : "off") }, (S.online ? "Online" : "Offline") + (pend ? " · " + pend + " a enviar" : "")));
   }
@@ -452,6 +488,21 @@
     return nav;
   }
 
+  function detalhesTecnicos(it) {
+    function area(campo, rotulo) {
+      var t = h("textarea", {
+        rows: 2, maxlength: 1500, placeholder: rotulo, value: it[campo] || "", "aria-label": rotulo,
+        oninput: function (e) { clearTimeout(t._t); t._t = setTimeout(function () { editarCampo(it, campo, e.target.value); }, 600); },
+        onblur: function (e) { clearTimeout(t._t); editarCampo(it, campo, e.target.value); }
+      });
+      return t;
+    }
+    var preenchido = !!(it.diagnostico || it.orientacao);
+    return h("details", { class: "tec", open: preenchido ? "" : null },
+      h("summary", {}, "Diagnóstico e orientação (opcional)" + (preenchido ? " ✓" : "")),
+      area("diagnostico", "Diagnóstico (o que você constatou e a causa provável, ditado)"),
+      area("orientacao", "Orientação (o que foi orientado ou recomendado, ditado)"));
+  }
   function cartaoRegistro(it) {
     var mini = it._pend ? null : S.minis.get(it.id);
     var url = it._pend ? (it._u = it._u || URL.createObjectURL(it.thumb)) : mini;
@@ -474,7 +525,12 @@
           type: "text", placeholder: "Local (ex.: torre B, 3º pavimento)", value: it.local || "", "aria-label": "Local",
           onchange: function (e) { editarCampo(it, "local", e.target.value); guardado("local", e.target.value); }
         }),
+        h("input", {
+          type: "text", list: "lista-sistemas", placeholder: "Sistema ou ambiente (ex.: Impermeabilização)", value: it.sistema || "", "aria-label": "Sistema ou ambiente",
+          onchange: function (e) { editarCampo(it, "sistema", e.target.value.trim()); guardado("sistema", e.target.value.trim()); }
+        }),
         ta, cont,
+        detalhesTecnicos(it),
         h("div", { class: "rod" },
           h("label", { class: "chk" }, h("input", { type: "checkbox", checked: it.entra !== false, onchange: function (e) { editarCampo(it, "entra", e.target.checked); } }), "Entra no relatório"),
           (it._pend || ehAdmin()) ? h("button", { class: "bt sec pe perigo", onclick: function () { confirmar(chave, function () { remover(it); }); } }, S.confirmar === chave ? "Confirmar?" : "Remover") : null)));
@@ -492,10 +548,16 @@
         semanas[seg][dia].forEach(function (it) { blocos.push(cartaoRegistro(it)); });
       });
     });
+    var usados = {};
+    SISTEMAS_BASE.forEach(function (x) { usados[x] = 1; });
+    S.regs.concat(S.fila).forEach(function (r) { if (r.sistema) usados[r.sistema] = 1; });
+    var dl = h("datalist", { id: "lista-sistemas" }, Object.keys(usados).sort().map(function (x) { return h("option", { value: x }); }));
     var cam = h("input", { type: "file", accept: "image/*", capture: "environment", multiple: true, hidden: true, onchange: aoCapturar });
     var gal = h("input", { type: "file", accept: "image/*", multiple: true, hidden: true, onchange: aoCapturar });
     return h("main", {},
       S.msg ? h("div", { class: "aviso" }, S.msg) : null,
+      S.semScript04 ? h("div", { class: "aviso" }, "Sistema, diagnóstico e orientação ainda não são salvos na nuvem: falta rodar o script 04 no Supabase. Até lá, a foto e a legenda continuam sendo enviadas normalmente.") : null,
+      dl,
       h("div", { class: "linha" },
         h("button", { class: "bt", onclick: function () { cam.click(); } }, "Tirar foto"),
         h("button", { class: "bt sec", onclick: function () { gal.click(); } }, "Da galeria")),
@@ -602,6 +664,257 @@
     return h("main", {}, h("div", { class: "cartao" }, h("h2", {}, tituloDe(id)),
       h("p", {}, "Módulo em definição. Ele será desenvolvido depois que a metodologia e o modelo de documento forem fornecidos pela engenharia."),
       h("p", { class: "mut" }, "A estrutura de acesso, o login e o banco de dados já estão prontos e serão reaproveitados.")));
+  }
+
+  // ---------------------------------------------------------------- relatórios (tipo, IA, aprovação)
+  var PRECOS = { "claude-haiku-4-5-20251001": [1, 5], "claude-sonnet-5-5": [2, 10] };   // US$ por milhão de tokens (entrada, saída)
+  function modeloDe(id) { return S.modelos.find(function (m) { return m.id === id; }) || null; }
+  function rotuloPeriodoSemana(seg) { var f = sexta(seg); return ddmm(parseDia(seg)) + " a " + ddmm(f) + "/" + f.getFullYear(); }
+  function dataBR(dia) { var d = parseDia(dia); return pad(d.getDate()) + "/" + pad(d.getMonth() + 1) + "/" + d.getFullYear(); }
+  function novoRel() {
+    var itens = itensDaObra().filter(function (i) { return !i._pend; }), ult = itens.length ? itens[itens.length - 1] : null;
+    var seg = ult ? ult.semana : diaDe(segundaDe(diaDe(new Date())));
+    return { id: null, modelo_id: modeloDe("fiscalizacao") ? "fiscalizacao" : (S.modelos[0] ? S.modelos[0].id : null), outros: false,
+      de: seg, ate: diaDe(sexta(seg)), tema: "", descricao: "", usar_item4: false, status: "rascunho",
+      conteudo: { resumos: {}, intro: "", secoes: [], item4: null, pendencias: [] }, uso_ia: {}, ocupado: "", prop: null, aviso: "" };
+  }
+  function abrirRel(r) {
+    S.rel = { id: r.id, modelo_id: r.modelo_id, outros: false, de: r.periodo_ini, ate: r.periodo_fim, tema: r.tema || "", descricao: r.descricao || "",
+      usar_item4: !!r.usar_item4, status: r.status, conteudo: JSON.parse(JSON.stringify(r.conteudo || {})), uso_ia: r.uso_ia || {}, ocupado: "", prop: null, aviso: "" };
+    S.rel.conteudo.resumos = S.rel.conteudo.resumos || {}; S.rel.conteudo.secoes = S.rel.conteudo.secoes || []; S.rel.conteudo.pendencias = S.rel.conteudo.pendencias || [];
+    render();
+  }
+  // páginas do relatório fotográfico: mesma regra do pacote (por semana, ordem da hora, 4 fotos por página)
+  function paginasDoPeriodo(de, ate) {
+    var itens = itensDaObra().filter(function (i) { return !i._pend && i.entra !== false && i.dia >= de && i.dia <= ate; }), sem = {}, pags = [];
+    itens.forEach(function (i) { (sem[i.semana] = sem[i.semana] || []).push(i); });
+    Object.keys(sem).sort().forEach(function (seg) {
+      for (var k = 0; k < sem[seg].length; k += 4) pags.push({ chave: seg + "|" + (k / 4 + 1), semana: seg, n: k / 4 + 1, fotos: sem[seg].slice(k, k + 4) });
+    });
+    return pags;
+  }
+  function gruposDoPeriodo(modelo, de, ate) {
+    var itens = itensDaObra().filter(function (i) { return !i._pend && i.entra !== false && i.dia >= de && i.dia <= ate; }), mapa = {}, ordem = [];
+    var modo = modelo.agrupar_por || "periodo", tpl = modelo.rotulo_subitem || "{periodo}";
+    itens.forEach(function (i) {
+      var chave = modo === "dia" ? i.dia : modo === "sistema" ? (i.sistema || "") : i.semana;
+      if (!mapa[chave]) {
+        var t = tpl.replace("{periodo}", modo === "periodo" ? rotuloPeriodoSemana(i.semana) : "")
+          .replace("{data}", dataBR(i.dia)).replace("{sistema}", i.sistema || "Sem sistema ou ambiente indicado");
+        mapa[chave] = { chave: modo + ":" + chave, titulo: t, itens: [] }; ordem.push(chave);
+      }
+      mapa[chave].itens.push({ dia: i.dia, sistema: i.sistema || "", local: i.local || "", legenda: i.legenda || "", diagnostico: i.diagnostico || "", orientacao: i.orientacao || "" });
+    });
+    if (modo !== "sistema") ordem.sort();
+    return ordem.map(function (c) { return mapa[c]; });
+  }
+  async function chamarIA(tarefa, dados) {
+    var r = await S.sb.functions.invoke("gerar-texto", { body: Object.assign({ tarefa: tarefa }, dados) });
+    if (r.error) {
+      var m = msgErro(r.error);
+      try { if (r.error.context && r.error.context.json) { var j = await r.error.context.json(); if (j && j.erro) m = j.erro; } } catch (e) { /* mantém */ }
+      if (/not found|404/i.test(m)) m = "A função da IA ainda não foi publicada no Supabase (passo de instalação da IA).";
+      throw new Error(m);
+    }
+    if (!r.data || r.data.ok === false) throw new Error((r.data && r.data.erro) || "A IA não respondeu.");
+    return r.data;
+  }
+  function somarUso(R, uso) {
+    if (!uso) return;
+    var u = R.uso_ia[uso.modelo] = R.uso_ia[uso.modelo] || { entrada: 0, saida: 0, chamadas: 0 };
+    u.entrada += uso.entrada || 0; u.saida += uso.saida || 0; u.chamadas++;
+  }
+  function custoUS(uso_ia) {
+    var t = 0;
+    Object.keys(uso_ia || {}).forEach(function (m) { var p = PRECOS[m]; if (p) t += (uso_ia[m].entrada * p[0] + uso_ia[m].saida * p[1]) / 1e6; });
+    return t;
+  }
+  function pendentes(txt) { return ((txt || "").match(/\[A CONFIRMAR\]/g) || []).length; }
+  function dadosRel(R) {
+    return { obra_id: S.obraId, modelo_id: R.modelo_id, periodo_ini: R.de, periodo_fim: R.ate, tema: R.tema, descricao: R.descricao,
+      usar_item4: R.usar_item4, conteudo: R.conteudo, uso_ia: R.uso_ia };
+  }
+  async function salvarRel(aprovar) {
+    var R = S.rel;
+    if (!R.modelo_id) { R.aviso = "Escolha o tipo de vistoria."; render(); return; }
+    if (!S.online) { R.aviso = "Salvar o relatório precisa de internet."; render(); return; }
+    var linha = dadosRel(R); linha.status = aprovar ? "aprovado" : "rascunho";
+    var r = R.id ? await S.sb.from("relatorios").update(linha).eq("id", R.id).select().single()
+                 : await S.sb.from("relatorios").insert(linha).select().single();
+    if (r.error) { R.aviso = colunaAusente(r.error) || /relation|does not exist/i.test(r.error.message || "") ? "Falta rodar o script 04 no Supabase." : "Erro ao salvar: " + msgErro(r.error); render(); return; }
+    R.id = r.data.id; R.status = r.data.status;
+    S.relatorios = [r.data].concat(S.relatorios.filter(function (x) { return x.id !== r.data.id; }));
+    await dbPut("cache", { k: "relatorios", v: S.relatorios });
+    R.aviso = aprovar ? "Relatório aprovado e salvo." : "Rascunho salvo."; render();
+  }
+  async function gerarRascunho() {
+    var R = S.rel, modelo = modeloDe(R.modelo_id), obra = obraAtual();
+    if (!modelo) { R.aviso = "Escolha ou crie o tipo de vistoria antes."; render(); return; }
+    var pags = paginasDoPeriodo(R.de, R.ate), grupos = gruposDoPeriodo(modelo, R.de, R.ate);
+    if (!pags.length) { R.aviso = "Não há fotos enviadas, marcadas para o relatório, nesse período."; render(); return; }
+    try {
+      var resumos = {}, base = pags.map(function (p) {
+        return { chave: p.chave, fotos: p.fotos.map(function (f, k) { return { n: k + 1, sistema: f.sistema || "", local: f.local || "", legenda: f.legenda || "" }; }) };
+      });
+      for (var k = 0; k < base.length; k += 40) {
+        R.ocupado = "Resumindo as legendas das páginas (" + Math.min(k + 40, base.length) + " de " + base.length + ")..."; render();
+        var a = await chamarIA("resumos", { paginas: base.slice(k, k + 40) });
+        a.resultado.resumos.forEach(function (x) { resumos[x.chave] = x.resumo; });
+        somarUso(R, a.uso);
+      }
+      R.ocupado = "Redigindo o item 3..."; render();
+      var cli = obra.cliente || "";
+      var b = await chamarIA("item3", {
+        modelo: { nome: modelo.nome, rotulo_item3: modelo.rotulo_item3, rotulo_item4: modelo.rotulo_item4, instrucoes_ia: modelo.instrucoes_ia },
+        relatorio: { cliente: cli, objetivo: obra.objetivo || "", nome_obra: obra.nome_no_texto || obra.nome_exibicao, tema: R.tema, descricao: R.descricao,
+          periodo: dataBR(R.de) + " a " + dataBR(R.ate), usar_item4: R.usar_item4 },
+        grupos: grupos
+      });
+      somarUso(R, b.uso);
+      var res = b.resultado;
+      R.conteudo = {
+        resumos: resumos, intro: res.intro || "",
+        secoes: grupos.map(function (g) { var s = res.secoes.find(function (x) { return x.chave === g.chave; }); return { chave: g.chave, titulo: g.titulo, texto: s && s.texto ? s.texto : "[A CONFIRMAR]" }; }),
+        item4: R.usar_item4 ? (res.item4 || "[A CONFIRMAR]") : null, pendencias: res.pendencias || []
+      };
+      R.ocupado = ""; R.aviso = "Rascunho gerado. Revise cada texto antes de aprovar.";
+      await salvarRel(false);
+    } catch (e) { R.ocupado = ""; R.aviso = "Não foi possível gerar: " + msgErro(e); render(); }
+  }
+  async function proporModelo() {
+    var R = S.rel, obra = obraAtual();
+    if (!(R.descricao || "").trim()) { R.aviso = "Descreva brevemente do que se trata a vistoria."; render(); return; }
+    try {
+      R.ocupado = "Propondo título e estrutura..."; render();
+      var a = await chamarIA("modelo_outros", { descricao: R.descricao, nome_obra: obra.nome_no_texto || obra.nome_exibicao, cliente: obra.cliente || "" });
+      somarUso(R, a.uso); R.prop = a.resultado; R.ocupado = ""; R.aviso = "Proposta pronta. Ajuste o que quiser e salve como modelo."; render();
+    } catch (e) { R.ocupado = ""; R.aviso = "Não foi possível propor: " + msgErro(e); render(); }
+  }
+  async function salvarModelo() {
+    var R = S.rel, p = R.prop;
+    if (!p || !(p.nome || "").trim() || !(p.titulo_capa || "").trim()) { R.aviso = "Preencha ao menos o nome e o título da capa."; render(); return; }
+    var id = slug(p.nome) + "-" + Math.random().toString(36).slice(2, 6);
+    var linha = { id: id, nome: p.nome.trim(), titulo_capa: p.titulo_capa.trim(), inclui_periodo: false, rotulo_item3: p.rotulo_item3 || "Considerações Finais",
+      agrupar_por: p.agrupar_por || "periodo", rotulo_subitem: p.rotulo_subitem || "{periodo}", tem_item4: !!p.tem_item4, rotulo_item4: "Proposta de correção",
+      tipo_encerramento: p.tipo_encerramento || "relatório de vistoria técnica", instrucoes_ia: p.instrucoes_ia || "", sistema: false };
+    var r = await S.sb.from("modelos_relatorio").insert(linha).select().single();
+    if (r.error) { R.aviso = "Erro ao salvar o modelo: " + msgErro(r.error); render(); return; }
+    S.modelos.push(r.data); await dbPut("cache", { k: "modelos", v: S.modelos });
+    R.modelo_id = id; R.outros = false; if (p.tema && !R.tema) R.tema = p.tema; R.usar_item4 = !!p.tem_item4; R.prop = null;
+    R.aviso = "Modelo salvo e selecionado. Ele ficará disponível nos próximos relatórios."; render();
+  }
+  function ligado(rotulo, obj, chave, o) {
+    o = o || {};
+    var el;
+    if (o.tipo === "area") el = h("textarea", { rows: o.linhas || 3, value: obj[chave] || "" });
+    else if (o.tipo === "select") { el = h("select", {}, o.opcoes.map(function (x) { return h("option", { value: x[0] }, x[1]); })); el.value = obj[chave] || o.opcoes[0][0]; }
+    else if (o.tipo === "check") { el = h("input", { type: "checkbox", checked: !!obj[chave] }); el.addEventListener("change", function (e) { obj[chave] = e.target.checked; render(); }); return h("label", { class: "chk", style: "margin:8px 0" }, el, rotulo); }
+    else el = h("input", { type: o.tipo || "text", value: obj[chave] || "" });
+    el.addEventListener(o.tipo === "select" ? "change" : "input", function (e) { obj[chave] = e.target.value; if (o.aoMudar) o.aoMudar(); });
+    return h("div", { class: "campo" }, h("label", {}, rotulo), el);
+  }
+  function telaRelatorios() {
+    var obra = obraAtual(), R = S.rel;
+    if (!obra) return h("main", {}, h("p", { class: "mut" }, "Cadastre uma obra em Clientes e obras."));
+    if (S.semScript04 && !S.modelos.length) {
+      return h("main", {}, h("div", { class: "cartao" }, h("h2", {}, "Falta um passo no Supabase"),
+        h("p", {}, "Para usar tipos de relatório e a IA, rode o script 04_modelos_relatorio_ia.sql no SQL Editor do Supabase e depois atualize o app.")));
+    }
+    if (!R) {
+      var lista = S.relatorios.filter(function (r) { return r.obra_id === S.obraId; });
+      return h("main", {},
+        S.msg ? h("div", { class: "aviso" }, S.msg) : null,
+        h("button", { class: "bt", onclick: function () { S.rel = novoRel(); render(); } }, "Novo relatório"),
+        lista.length ? lista.map(function (r) {
+          var m = modeloDe(r.modelo_id), chave = "dr" + r.id;
+          return h("div", { class: "cartao" },
+            h("div", { class: "meta" }, h("strong", {}, m ? m.nome : r.modelo_id), h("span", { class: "tag " + (r.status === "aprovado" ? "env" : "pen") }, r.status === "aprovado" ? "Aprovado" : "Rascunho")),
+            h("p", { class: "mut" }, dataBR(r.periodo_ini) + " a " + dataBR(r.periodo_fim) + (r.tema ? " · " + r.tema : "")),
+            h("div", { class: "linha" },
+              h("button", { class: "bt sec pe", onclick: function () { abrirRel(r); } }, "Abrir"),
+              ehAdmin() ? h("button", { class: "bt sec pe perigo", onclick: function () { confirmar(chave, async function () {
+                var d = await S.sb.from("relatorios").delete().eq("id", r.id);
+                if (!d.error) { S.relatorios = S.relatorios.filter(function (x) { return x.id !== r.id; }); await dbPut("cache", { k: "relatorios", v: S.relatorios }); }
+                render(); }); } }, S.confirmar === chave ? "Confirmar?" : "Excluir") : null));
+        }) : h("p", { class: "mut" }, "Nenhum relatório criado para esta obra ainda."));
+    }
+    var modelo = modeloDe(R.modelo_id), pags = paginasDoPeriodo(R.de, R.ate), semLeg = 0;
+    pags.forEach(function (p) { p.fotos.forEach(function (f) { if (!(f.legenda || "").trim()) semLeg++; }); });
+    var customs = S.modelos.filter(function (m) { return !m.sistema && m.ativo !== false; });
+    function botaoTipo(rot, ativo, fn) { return h("button", { class: "bt pe" + (ativo ? "" : " sec"), onclick: fn }, rot); }
+    var ehOutros = R.outros || (modelo && !modelo.sistema);
+    var cartaoTipo = h("div", { class: "cartao" }, h("h2", {}, "Tipo de vistoria"),
+      h("div", { class: "linha" },
+        botaoTipo("Fiscalização", !ehOutros && R.modelo_id === "fiscalizacao", function () { R.modelo_id = "fiscalizacao"; R.outros = false; R.usar_item4 = false; render(); }),
+        botaoTipo("Consultoria", !ehOutros && R.modelo_id === "consultoria", function () { R.modelo_id = "consultoria"; R.outros = false; render(); }),
+        botaoTipo("Outros tipos", ehOutros, function () { R.outros = true; R.modelo_id = null; render(); })));
+    if (ehOutros) {
+      cartaoTipo.append(
+        customs.length ? h("div", { class: "campo" }, h("label", {}, "Modelos de outros tipos já salvos"),
+          (function () {
+            var s = h("select", { onchange: function (e) { R.modelo_id = e.target.value || null; R.outros = !e.target.value; render(); } },
+              [h("option", { value: "" }, "Criar um novo tipo")].concat(customs.map(function (m) { return h("option", { value: m.id }, m.nome); })));
+            s.value = (modelo && !modelo.sistema) ? modelo.id : ""; return s; })()) : null);
+      if (!modelo) {
+        cartaoTipo.append(ligado("Descreva brevemente do que se trata a vistoria", R, "descricao", { tipo: "area", linhas: 3 }),
+          h("button", { class: "bt", disabled: !!R.ocupado || !S.online, onclick: proporModelo }, R.ocupado || "Propor título e estrutura (IA)"));
+        if (R.prop) {
+          var P = R.prop;
+          cartaoTipo.append(h("div", { class: "prop" },
+            h("p", { class: "mut" }, "Proposta da IA, só de estrutura. Valide e ajuste antes de salvar."),
+            ligado("Nome do modelo", P, "nome"), ligado("Título da capa", P, "titulo_capa"), ligado("Tema (subtítulo da capa)", P, "tema"),
+            ligado("Nome do item 3", P, "rotulo_item3"),
+            ligado("Subitens do item 3 por", P, "agrupar_por", { tipo: "select", opcoes: [["periodo", "período (semana)"], ["dia", "dia de visita"], ["sistema", "sistema ou ambiente"]] }),
+            ligado("Título dos subitens ({periodo}, {data} ou {sistema})", P, "rotulo_subitem"),
+            ligado("Incluir item 4, proposta de correção, por padrão", P, "tem_item4", { tipo: "check" }),
+            ligado("Frase do encerramento (\"O presente ...\")", P, "tipo_encerramento"),
+            ligado("Instruções de estilo para a IA", P, "instrucoes_ia", { tipo: "area", linhas: 4 }),
+            h("button", { class: "bt", onclick: salvarModelo }, "Salvar como modelo e usar")));
+        }
+      }
+    }
+    var cartaoDados = h("div", { class: "cartao" }, h("h2", {}, "Período e dados"),
+      h("div", { class: "linha" }, ligado("De", R, "de", { tipo: "date", aoMudar: function () { } }), ligado("Até", R, "ate", { tipo: "date", aoMudar: function () { } })),
+      modelo && !modelo.inclui_periodo ? ligado("Tema da vistoria (subtítulo da capa)", R, "tema") : null,
+      ligado("Incluir item 4, proposta de correção (marque quando houver prescrição de reparo)", R, "usar_item4", { tipo: "check" }),
+      h("p", { class: "mut" }, pags.length + " página(s) de fotos no período" + (semLeg ? ", " + semLeg + " foto(s) sem legenda" : "") + ". Fotos ainda não enviadas ficam de fora."));
+    var chaveGer = "ger" + (R.id || "novo"), temTexto = R.conteudo.secoes.length || Object.keys(R.conteudo.resumos).length;
+    var bGerar = h("button", { class: "bt", disabled: !!R.ocupado || !S.online || !modelo, onclick: function () {
+      if (temTexto) confirmar(chaveGer, gerarRascunho); else gerarRascunho(); } },
+      R.ocupado || (S.confirmar === chaveGer ? "Substituir textos atuais?" : (temTexto ? "Gerar rascunho de novo (IA)" : "Gerar rascunho com IA")));
+    var partes = [S.msg ? h("div", { class: "aviso" }, S.msg) : null, R.aviso ? h("div", { class: "aviso" }, R.aviso) : null,
+      h("div", { class: "linha" }, h("button", { class: "bt sec pe", onclick: function () { S.rel = null; render(); } }, "‹ Voltar"),
+        h("span", { class: "tag " + (R.status === "aprovado" ? "env" : "pen") }, R.status === "aprovado" ? "Aprovado" : "Rascunho")),
+      cartaoTipo, cartaoDados, bGerar];
+    var custo = custoUS(R.uso_ia);
+    if (custo > 0) partes.push(h("p", { class: "mut" }, "Uso de IA neste relatório: cerca de US$ " + custo.toFixed(3) + " (estimativa pelos tokens usados)."));
+    if (temTexto) {
+      partes.push(h("div", { class: "cartao" }, h("h2", {}, "Resumos das páginas (item 2)"),
+        pags.map(function (p) {
+          var txt = R.conteudo.resumos[p.chave] || "", cont = h("div", { class: "cont" + (txt.length > LIMITE_LEGENDA ? " ex" : "") }, txt.length + "/" + LIMITE_LEGENDA);
+          var ta = h("textarea", { rows: 3, value: txt, oninput: function (e) { R.conteudo.resumos[p.chave] = e.target.value; cont.textContent = e.target.value.length + "/" + LIMITE_LEGENDA; cont.className = "cont" + (e.target.value.length > LIMITE_LEGENDA ? " ex" : ""); } });
+          return h("div", { class: "campo" }, h("label", {}, "Semana " + rotuloPeriodoSemana(p.semana) + ", página " + p.n),
+            h("div", { class: "faixa" }, p.fotos.map(function (f) { var u = S.minis.get(f.id); return u ? h("img", { src: u, alt: "" }) : h("span", { class: "mini-vz" }, "foto"); })), ta, cont);
+        })));
+      var c3 = [h("h2", {}, "Item 3: " + (modelo ? modelo.rotulo_item3 : "")), ligado("Abertura", R.conteudo, "intro", { tipo: "area", linhas: 3 })];
+      R.conteudo.secoes.forEach(function (s, i) {
+        var n = pendentes(s.texto);
+        c3.push(h("div", { class: "campo" }, h("label", {}, "3." + (i + 1) + " " + s.titulo + (n ? " (" + n + " a confirmar)" : "")),
+          h("textarea", { rows: 8, value: s.texto || "", oninput: function (e) { s.texto = e.target.value; } })));
+      });
+      if (R.usar_item4) c3.push(ligado("Item 4: " + (modelo ? modelo.rotulo_item4 : "Proposta de correção"), R.conteudo, "item4", { tipo: "area", linhas: 8 }));
+      if ((R.conteudo.pendencias || []).length) c3.push(h("div", { class: "aviso" }, h("strong", {}, "Pendências indicadas pela IA:"), h("ul", {}, R.conteudo.pendencias.map(function (x) { return h("li", {}, x); }))));
+      partes.push(h("div", { class: "cartao" }, c3));
+      partes.push(h("div", { class: "cartao" },
+        h("div", { class: "linha" },
+          h("button", { class: "bt sec", disabled: !S.online, onclick: function () { salvarRel(false); } }, "Salvar rascunho"),
+          h("button", { class: "bt", disabled: !S.online, onclick: function () { salvarRel(true); } }, "Aprovar")),
+        h("button", { class: "bt sec", style: "margin-top:8px", disabled: !!S.exportando || !S.online,
+          onclick: function () { exportar(R.de, R.ate, { status: R.status, modelo_id: R.modelo_id, tema: R.tema, periodo_ini: R.de, periodo_fim: R.ate, usar_item4: R.usar_item4, conteudo: R.conteudo }); } },
+          S.exportando || "Baixar pacote com este relatório (.zip)"),
+        h("p", { class: "mut" }, "O pacote leva as fotos, as legendas, os textos desta tela e o cadastro da obra, para gerar o .docx.")));
+    }
+    return h("main", {}, partes);
   }
 
   // ---------------------------------------------------------------- clientes e obras
@@ -819,6 +1132,7 @@
     if (id === "inicio") tela = telaInicio();
     else if (id === "painel" && temModulo("vistoria")) tela = telaPainel();
     else if (id === "regs" && temModulo("vistoria")) tela = telaRegistros();
+    else if (id === "relatorios" && temModulo("vistoria")) tela = telaRelatorios();
     else if (id === "clientes" && temModulo("vistoria")) tela = telaClientes();
     else if (id === "usuarios" && ehAdmin()) tela = telaUsuarios();
     else if (id === "conta") tela = telaConta();

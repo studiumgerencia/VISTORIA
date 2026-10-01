@@ -104,3 +104,10 @@ header .tit{flex:1}
 }
 @media (max-width:899px){ nav{display:flex} .tabela .tr{grid-template-columns:1.6fr 1.2fr .5fr 1fr;font-size:12px} }
 .campo label.chk{display:flex;font-weight:600}
+.tec{margin:6px 0}
+.tec summary{font-size:12px;font-weight:600;cursor:pointer;color:var(--mut);padding:4px 0}
+.tec textarea{margin-top:6px}
+.faixa{display:flex;gap:6px;overflow-x:auto;margin:4px 0 8px}
+.faixa img{height:56px;width:auto;border-radius:6px;border:1px solid var(--line)}
+.mini-vz{display:inline-flex;align-items:center;justify-content:center;height:56px;min-width:56px;border:1px dashed var(--line);border-radius:6px;font-size:10px;color:var(--mut)}
+.prop{border-top:1px dashed var(--line);margin-top:12px;padding-top:8px}
