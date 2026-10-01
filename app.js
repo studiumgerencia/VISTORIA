@@ -748,6 +748,16 @@
     await dbPut("cache", { k: "relatorios", v: S.relatorios });
     R.aviso = aprovar ? "Relatório aprovado e salvo." : "Rascunho salvo."; render();
   }
+  // se a IA não devolver as orientações, usa o que foi ditado em cada foto (sem reescrita), para nada se perder
+  function orientacoesDoGrupo(s, g, avisos) {
+    var ia = s && s.orientacoes ? s.orientacoes.trim() : "";
+    if (ia && ia !== "[A CONFIRMAR]") return ia;
+    var vistos = {}, lista = [];
+    g.itens.forEach(function (i) { var t = (i.orientacao || "").trim(); if (t && !vistos[t]) { vistos[t] = 1; lista.push(t); } });
+    if (!lista.length) return "[A CONFIRMAR]";
+    avisos.push("Item 4 de \"" + g.titulo + "\": a IA não devolveu as orientações, então entraram como ditadas, sem revisão. Revise o texto.");
+    return lista.map(function (t, k) { return (k + 1) + ". " + t; }).join("\n");
+  }
   async function gerarRascunho() {
     var R = S.rel, modelo = modeloDe(R.modelo_id), obra = obraAtual();
     if (!modelo) { R.aviso = "Escolha ou crie o tipo de vistoria antes."; render(); return; }
@@ -772,15 +782,17 @@
         grupos: grupos
       });
       somarUso(R, b.uso);
-      var res = b.resultado;
+      var res = b.resultado, avisos = [];
+      var funcaoAntiga = res.secoes.length > 0 && res.secoes.every(function (x) { return x.orientacoes === undefined; });
+      if (funcaoAntiga) avisos.push("A função da IA publicada no Supabase está na versão anterior. Publique a versão nova do arquivo funcao_gerar-texto.ts e gere de novo.");
       R.conteudo = {
         resumos: resumos,
         secoes: grupos.map(function (g) {
           var s = res.secoes.find(function (x) { return x.chave === g.chave; });
           return { chave: g.chave, titulo: g.titulo, texto: s && s.texto ? s.texto : "[A CONFIRMAR]",
-            orientacoes: R.usar_item4 ? (s && s.orientacoes ? s.orientacoes : "[A CONFIRMAR]") : "" };
+            orientacoes: R.usar_item4 ? orientacoesDoGrupo(s, g, avisos) : "" };
         }),
-        pendencias: res.pendencias || []
+        pendencias: (res.pendencias || []).concat(avisos)
       };
       R.ocupado = ""; R.aviso = "Rascunho gerado. Revise cada texto antes de aprovar.";
       await salvarRel(false);
@@ -911,9 +923,12 @@
       });
       if (R.usar_item4) {
         c3.push(h("h2", { style: "margin-top:16px" }, "Item 4: " + (modelo ? modelo.rotulo_item4 : "Proposta de correção")));
+        var ditas = {};
+        gruposDoPeriodo(modelo, R.de, R.ate).forEach(function (g) { ditas[g.chave] = g.itens.filter(function (x) { return (x.orientacao || "").trim(); }).length; });
         R.conteudo.secoes.forEach(function (s, i) {
-          var n = pendentes(s.orientacoes);
-          c3.push(h("div", { class: "campo" }, h("label", {}, "4." + (i + 1) + " " + (s.titulo || "") + (n ? " (a confirmar)" : "")),
+          var n = pendentes(s.orientacoes), nd = ditas[s.chave];
+          c3.push(h("div", { class: "campo" }, h("label", {}, "4." + (i + 1) + " " + (s.titulo || "") + (n ? " (a confirmar)" : "") +
+              (nd === undefined ? "" : " · " + nd + " orientação(ões) ditada(s) nas fotos deste grupo")),
             h("textarea", { rows: 5, value: s.orientacoes || "", oninput: function (e) { s.orientacoes = e.target.value; } })));
         });
       }
