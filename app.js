@@ -407,6 +407,7 @@
     }
     zip.file("registros.csv", "﻿" + linhas.join("\r\n"));
     zip.file("obra.json", JSON.stringify(obra, null, 2));
+    zip.file("pacote.json", JSON.stringify({ exportado_em: new Date().toISOString(), exportado_dia: diaDe(new Date()), versao: CFG.VERSAO }));
     if (rel) {
       var mdl = S.modelos.find(function (x) { return x.id === rel.modelo_id; }) || {};
       zip.file("relatorio.json", JSON.stringify({
@@ -676,7 +677,7 @@
     var seg = ult ? ult.semana : diaDe(segundaDe(diaDe(new Date())));
     return { id: null, modelo_id: modeloDe("fiscalizacao") ? "fiscalizacao" : (S.modelos[0] ? S.modelos[0].id : null), outros: false,
       de: seg, ate: diaDe(sexta(seg)), tema: "", descricao: "", usar_item4: false, status: "rascunho",
-      conteudo: { resumos: {}, intro: "", secoes: [], item4: null, pendencias: [] }, uso_ia: {}, ocupado: "", prop: null, aviso: "" };
+      conteudo: { resumos: {}, secoes: [], pendencias: [] }, uso_ia: {}, ocupado: "", prop: null, aviso: "" };
   }
   function abrirRel(r) {
     S.rel = { id: r.id, modelo_id: r.modelo_id, outros: false, de: r.periodo_ini, ate: r.periodo_fim, tema: r.tema || "", descricao: r.descricao || "",
@@ -765,7 +766,7 @@
       R.ocupado = "Redigindo o item 3..."; render();
       var cli = obra.cliente || "";
       var b = await chamarIA("item3", {
-        modelo: { nome: modelo.nome, rotulo_item3: modelo.rotulo_item3, rotulo_item4: modelo.rotulo_item4, instrucoes_ia: modelo.instrucoes_ia },
+        modelo: { id: modelo.id, nome: modelo.nome, rotulo_item3: modelo.rotulo_item3, rotulo_item4: modelo.rotulo_item4, instrucoes_ia: modelo.instrucoes_ia },
         relatorio: { cliente: cli, objetivo: obra.objetivo || "", nome_obra: obra.nome_no_texto || obra.nome_exibicao, tema: R.tema, descricao: R.descricao,
           periodo: dataBR(R.de) + " a " + dataBR(R.ate), usar_item4: R.usar_item4 },
         grupos: grupos
@@ -773,9 +774,13 @@
       somarUso(R, b.uso);
       var res = b.resultado;
       R.conteudo = {
-        resumos: resumos, intro: res.intro || "",
-        secoes: grupos.map(function (g) { var s = res.secoes.find(function (x) { return x.chave === g.chave; }); return { chave: g.chave, titulo: g.titulo, texto: s && s.texto ? s.texto : "[A CONFIRMAR]" }; }),
-        item4: R.usar_item4 ? (res.item4 || "[A CONFIRMAR]") : null, pendencias: res.pendencias || []
+        resumos: resumos,
+        secoes: grupos.map(function (g) {
+          var s = res.secoes.find(function (x) { return x.chave === g.chave; });
+          return { chave: g.chave, titulo: g.titulo, texto: s && s.texto ? s.texto : "[A CONFIRMAR]",
+            orientacoes: R.usar_item4 ? (s && s.orientacoes ? s.orientacoes : "[A CONFIRMAR]") : "" };
+        }),
+        pendencias: res.pendencias || []
       };
       R.ocupado = ""; R.aviso = "Rascunho gerado. Revise cada texto antes de aprovar.";
       await salvarRel(false);
@@ -845,7 +850,7 @@
     var ehOutros = R.outros || (modelo && !modelo.sistema);
     var cartaoTipo = h("div", { class: "cartao" }, h("h2", {}, "Tipo de vistoria"),
       h("div", { class: "linha" },
-        botaoTipo("Fiscalização", !ehOutros && R.modelo_id === "fiscalizacao", function () { R.modelo_id = "fiscalizacao"; R.outros = false; R.usar_item4 = false; render(); }),
+        botaoTipo("Fiscalização", !ehOutros && R.modelo_id === "fiscalizacao", function () { R.modelo_id = "fiscalizacao"; R.outros = false; render(); }),
         botaoTipo("Consultoria", !ehOutros && R.modelo_id === "consultoria", function () { R.modelo_id = "consultoria"; R.outros = false; render(); }),
         botaoTipo("Outros tipos", ehOutros, function () { R.outros = true; R.modelo_id = null; render(); })));
     if (ehOutros) {
@@ -876,7 +881,7 @@
     var cartaoDados = h("div", { class: "cartao" }, h("h2", {}, "Período e dados"),
       h("div", { class: "linha" }, ligado("De", R, "de", { tipo: "date", aoMudar: function () { } }), ligado("Até", R, "ate", { tipo: "date", aoMudar: function () { } })),
       modelo && !modelo.inclui_periodo ? ligado("Tema da vistoria (subtítulo da capa)", R, "tema") : null,
-      ligado("Incluir item 4, proposta de correção (marque quando houver prescrição de reparo)", R, "usar_item4", { tipo: "check" }),
+      ligado("Incluir item 4, proposta de correção (marque quando houver prescrição de reparo). As orientações ditadas só entram no relatório com o item 4 ligado.", R, "usar_item4", { tipo: "check" }),
       h("p", { class: "mut" }, pags.length + " página(s) de fotos no período" + (semLeg ? ", " + semLeg + " foto(s) sem legenda" : "") + ". Fotos ainda não enviadas ficam de fora."));
     var chaveGer = "ger" + (R.id || "novo"), temTexto = R.conteudo.secoes.length || Object.keys(R.conteudo.resumos).length;
     var bGerar = h("button", { class: "bt", disabled: !!R.ocupado || !S.online || !modelo, onclick: function () {
@@ -896,13 +901,22 @@
           return h("div", { class: "campo" }, h("label", {}, "Semana " + rotuloPeriodoSemana(p.semana) + ", página " + p.n),
             h("div", { class: "faixa" }, p.fotos.map(function (f) { var u = S.minis.get(f.id); return u ? h("img", { src: u, alt: "" }) : h("span", { class: "mini-vz" }, "foto"); })), ta, cont);
         })));
-      var c3 = [h("h2", {}, "Item 3: " + (modelo ? modelo.rotulo_item3 : "")), ligado("Abertura", R.conteudo, "intro", { tipo: "area", linhas: 3 })];
+      var c3 = [h("h2", {}, "Item 3: " + (modelo ? modelo.rotulo_item3 : "")),
+        h("p", { class: "mut" }, "A abertura do item 3 é um texto padrão. Os títulos abaixo podem ser editados.")];
       R.conteudo.secoes.forEach(function (s, i) {
         var n = pendentes(s.texto);
-        c3.push(h("div", { class: "campo" }, h("label", {}, "3." + (i + 1) + " " + s.titulo + (n ? " (" + n + " a confirmar)" : "")),
-          h("textarea", { rows: 8, value: s.texto || "", oninput: function (e) { s.texto = e.target.value; } })));
+        c3.push(h("div", { class: "campo" }, h("label", {}, "3." + (i + 1) + (n ? " (" + n + " a confirmar)" : "")),
+          h("input", { type: "text", value: s.titulo || "", "aria-label": "Título do subitem", oninput: function (e) { s.titulo = e.target.value; } }),
+          h("textarea", { rows: 6, value: s.texto || "", oninput: function (e) { s.texto = e.target.value; } })));
       });
-      if (R.usar_item4) c3.push(ligado("Item 4: " + (modelo ? modelo.rotulo_item4 : "Proposta de correção"), R.conteudo, "item4", { tipo: "area", linhas: 8 }));
+      if (R.usar_item4) {
+        c3.push(h("h2", { style: "margin-top:16px" }, "Item 4: " + (modelo ? modelo.rotulo_item4 : "Proposta de correção")));
+        R.conteudo.secoes.forEach(function (s, i) {
+          var n = pendentes(s.orientacoes);
+          c3.push(h("div", { class: "campo" }, h("label", {}, "4." + (i + 1) + " " + (s.titulo || "") + (n ? " (a confirmar)" : "")),
+            h("textarea", { rows: 5, value: s.orientacoes || "", oninput: function (e) { s.orientacoes = e.target.value; } })));
+        });
+      }
       if ((R.conteudo.pendencias || []).length) c3.push(h("div", { class: "aviso" }, h("strong", {}, "Pendências indicadas pela IA:"), h("ul", {}, R.conteudo.pendencias.map(function (x) { return h("li", {}, x); }))));
       partes.push(h("div", { class: "cartao" }, c3));
       partes.push(h("div", { class: "cartao" },
