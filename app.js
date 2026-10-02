@@ -300,45 +300,65 @@
   }
 
   // ---------------------------------------------------------------- ações
+  // junta o dia escolhido com a hora original da foto
+  function dataNoDia(dia, data) {
+    var p = dia.split("-");
+    return new Date(+p[0], +p[1] - 1, +p[2], data.getHours(), data.getMinutes(), data.getSeconds());
+  }
   async function aoCapturar(ev) {
     var arqs = Array.prototype.slice.call(ev.target.files || []);
+    var diaForcado = ev.target.dataset && ev.target.dataset.galeria ? S.diaGal : "";
     ev.target.value = "";
     if (!arqs.length || !S.obraId) return;
     for (var i = 0; i < arqs.length; i++) {
       S.msg = "Processando foto " + (i + 1) + " de " + arqs.length + "...";
       render();
       try {
-        var f = await processar(arqs[i]), dia = diaDe(f.data);
+        var f = await processar(arqs[i]);
+        if (diaForcado) f.data = dataNoDia(diaForcado, f.data);
+        var dia = diaDe(f.data);
         var item = {
           id: novoId(), obra_id: S.obraId, dia: dia, ts: f.data.toISOString(), semana: diaDe(segundaDe(dia)),
-          local: guardado("local") || "", legenda: "", sistema: guardado("sistema") || "", diagnostico: "", orientacao: "", entra: true, blob: f.blob, thumb: f.thumb, w: f.w, h: f.h, estado: "pendente"
+          local: "", legenda: "", sistema: "", diagnostico: "", orientacao: "", entra: true, blob: f.blob, thumb: f.thumb, w: f.w, h: f.h, estado: "pendente"
         };
         await dbPut("fila", item);
         S.fila.push(item);
       } catch (e) { S.msg = "Falha ao processar a foto: " + msgErro(e); }
     }
     S.msg = "";
+    if (diaForcado) { S.diaGal = ""; }
     var novos = S.fila.filter(function (x) { return x.obra_id === S.obraId; }).sort(function (a, b) { return new Date(b.ts) - new Date(a.ts); });
     S.novoId = novos[0] ? novos[0].id : null;
     render();
     sincronizar();
   }
   async function editarCampo(it, campo, valor) {
+    var campos = typeof campo === "object" ? campo : (function () { var o = {}; o[campo] = valor; return o; })();
     if (it._pend) {
       var p = S.fila.find(function (x) { return x.id === it.id; });
       if (!p) return;
-      p[campo] = valor; await dbPut("fila", p);
+      Object.assign(p, campos); await dbPut("fila", p);
     } else {
       var r = S.regs.find(function (x) { return x.id === it.id; });
       var ed = S.edicoes[it.id] || { id: it.id, campos: {} };
-      ed.campos[campo] = valor; S.edicoes[it.id] = ed;
+      Object.assign(ed.campos, campos); S.edicoes[it.id] = ed;
       await dbPut("edicoes", ed);
-      if (r) r[campo] = valor;
+      if (r) Object.assign(r, campos);
       if (S.online && S.sb) {
         var u = await gravarCampos(it.id, ed.campos);
         if (!u.error) { await dbDel("edicoes", it.id); delete S.edicoes[it.id]; }
       }
     }
+  }
+  async function moverParaDia(itens, novoDia) {
+    if (!novoDia) { S.msg = "Escolha o novo dia antes de mover."; render(); return; }
+    for (var i = 0; i < itens.length; i++) {
+      var it = itens[i], nova = dataNoDia(novoDia, new Date(it.ts));
+      await editarCampo(it, { dia: novoDia, ts: nova.toISOString(), semana: diaDe(segundaDe(novoDia)) });
+    }
+    S.moverDia = null; S.msg = itens.length + " foto(s) movida(s) para " + rotuloDia(novoDia) + ".";
+    render();
+    if (S.online) sincronizar();
   }
   function confirmar(chave, fn) {
     if (S.confirmar === chave) { S.confirmar = null; fn(); return; }
@@ -533,11 +553,11 @@
         h("div", { class: "meta" }, hora(it.ts), tag, it.estado === "falha" && it.erro ? h("span", { class: "erro" }, it.erro) : null),
         h("input", {
           type: "text", placeholder: "Local (ex.: torre B, 3º pavimento)", value: it.local || "", "aria-label": "Local",
-          onchange: function (e) { editarCampo(it, "local", e.target.value); guardado("local", e.target.value); }
+          onchange: function (e) { editarCampo(it, "local", e.target.value); }
         }),
         h("input", {
           type: "text", list: "lista-sistemas", placeholder: "Sistema ou ambiente (ex.: Impermeabilização)", value: it.sistema || "", "aria-label": "Sistema ou ambiente",
-          onchange: function (e) { editarCampo(it, "sistema", e.target.value.trim()); guardado("sistema", e.target.value.trim()); }
+          onchange: function (e) { editarCampo(it, "sistema", e.target.value.trim()); }
         }),
         ta, cont,
         detalhesTecnicos(it),
@@ -597,7 +617,15 @@
       blocos.push(h("div", { class: "semana" }, h("span", {}, rotuloSemana(seg)),
         h("button", { onclick: function () { exportar(seg, diaDe(new Date(sexta(seg).getTime() + 2 * 86400000))); }, disabled: !!S.exportando }, "Exportar semana")));
       Object.keys(semanas[seg]).sort().reverse().forEach(function (dia) {
-        blocos.push(h("div", { class: "dia" }, rotuloDia(dia) + " (" + semanas[seg][dia].length + ")"));
+        blocos.push(h("div", { class: "dia" }, rotuloDia(dia) + " (" + semanas[seg][dia].length + ")",
+          h("button", { class: "bt sec pe", style: "margin-left:8px;padding:2px 8px;font-size:12px", onclick: function () { S.moverDia = S.moverDia === dia ? null : dia; render(); } }, "Alterar dia")));
+        if (S.moverDia === dia) {
+          var inMover = h("input", { type: "date", value: dia });
+          blocos.push(h("div", { class: "cartao" },
+            h("p", { class: "mut" }, "Move as " + semanas[seg][dia].length + " fotos deste dia para outro dia. A hora de cada foto é mantida."),
+            h("div", { class: "linha" }, h("div", { class: "campo" }, h("label", {}, "Novo dia"), inMover),
+              h("button", { class: "bt", onclick: function () { moverParaDia(semanas[seg][dia].slice(), inMover.value); } }, "Mover"))));
+        }
         semanas[seg][dia].slice().reverse().forEach(function (it) { blocos.push(cartaoRegistro(it)); });   // mais recente primeiro
       });
     });
@@ -606,7 +634,8 @@
     S.regs.concat(S.fila).forEach(function (r) { if (r.sistema) usados[r.sistema] = 1; });
     var dl = h("datalist", { id: "lista-sistemas" }, Object.keys(usados).sort().map(function (x) { return h("option", { value: x }); }));
     var cam = h("input", { type: "file", accept: "image/*", capture: "environment", multiple: true, hidden: true, onchange: aoCapturar });
-    var gal = h("input", { type: "file", accept: "image/*", multiple: true, hidden: true, onchange: aoCapturar });
+    var gal = h("input", { type: "file", accept: "image/*", multiple: true, hidden: true, onchange: aoCapturar, "data-galeria": "1" });
+    var inDiaGal = h("input", { type: "date", value: S.diaGal || "", max: diaDe(new Date()), onchange: function (e) { S.diaGal = e.target.value; } });
     var ob = obraAtual();
     return h("main", {},
       S.msg ? h("div", { class: "aviso" }, S.msg) : null,
@@ -617,6 +646,10 @@
         h("button", { class: "bt", onclick: function () { cam.click(); } }, "Tirar foto"),
         h("button", { class: "bt sec", onclick: function () { gal.click(); } }, "Da galeria")),
       cam, gal,
+      h("div", { class: "campo", style: "margin-top:8px" },
+        h("label", {}, "Dia das fotos da galeria (opcional)"),
+        inDiaGal,
+        h("p", { class: "mut" }, "Vazio: o app usa a data original de cada foto. Preenchido: todas as fotos escolhidas na galeria entram neste dia (a hora original é mantida). O campo volta a ficar vazio após o envio.")),
       h("div", { class: "linha", style: "margin-top:8px" },
         h("button", { class: "bt sec pe", disabled: S.sincronizando || !S.fila.length, onclick: function () { sincronizar(true); } },
           S.sincronizando ? "Enviando..." : (S.fila.length ? "Enviar agora (" + S.fila.length + ")" : "Tudo enviado"))),
