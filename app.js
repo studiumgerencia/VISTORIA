@@ -773,8 +773,25 @@
     render();
   }
   // páginas do relatório fotográfico: mesma regra do pacote (por semana, ordem da hora, 4 fotos por página)
+  // Foto sem legenda = repete o ponto da foto anterior do mesmo dia (herda legenda, sistema e local)
+  function itensDoPeriodo(de, ate) {
+    var lista = itensDaObra().filter(function (i) { return !i._pend && i.entra !== false && i.dia >= de && i.dia <= ate; })
+      .sort(function (a, b) { return new Date(a.ts) - new Date(b.ts); });
+    var ult = null, diaUlt = "";
+    return lista.map(function (i) {
+      if (i.dia !== diaUlt) { ult = null; diaUlt = i.dia; }
+      var e = Object.assign({}, i, { herdada: false });
+      if (!(i.legenda || "").trim() && ult) {
+        e.legenda = ult.legenda; e.herdada = true;
+        if (!e.sistema) e.sistema = ult.sistema;
+        if (!e.local) e.local = ult.local;
+      }
+      if ((e.legenda || "").trim() && !e.herdada) ult = { legenda: e.legenda, sistema: e.sistema || "", local: e.local || "" };
+      return e;
+    });
+  }
   function paginasDoPeriodo(de, ate) {
-    var itens = itensDaObra().filter(function (i) { return !i._pend && i.entra !== false && i.dia >= de && i.dia <= ate; }), sem = {}, pags = [];
+    var itens = itensDoPeriodo(de, ate), sem = {}, pags = [];
     itens.forEach(function (i) { (sem[i.semana] = sem[i.semana] || []).push(i); });
     Object.keys(sem).sort().forEach(function (seg) {
       for (var k = 0; k < sem[seg].length; k += 4) pags.push({ chave: seg + "|" + (k / 4 + 1), semana: seg, n: k / 4 + 1, fotos: sem[seg].slice(k, k + 4) });
@@ -782,7 +799,9 @@
     return pags;
   }
   function gruposDoPeriodo(modelo, de, ate) {
-    var itens = itensDaObra().filter(function (i) { return !i._pend && i.entra !== false && i.dia >= de && i.dia <= ate; }), mapa = {}, ordem = [];
+    var itens = itensDoPeriodo(de, ate).filter(function (i) {
+      return !i.herdada || (i.diagnostico || "").trim() || (i.orientacao || "").trim();   // fotos que repetem a legenda não duplicam texto
+    }), mapa = {}, ordem = [];
     var modo = modelo.agrupar_por || "periodo", tpl = modelo.rotulo_subitem || "{periodo}";
     itens.forEach(function (i) {
       var chave = modo === "dia" ? i.dia : modo === "sistema" ? (i.sistema || "") : i.semana;
@@ -791,7 +810,7 @@
           .replace("{data}", dataBR(i.dia)).replace("{sistema}", i.sistema || "Sem sistema ou ambiente indicado");
         mapa[chave] = { chave: modo + ":" + chave, titulo: t, itens: [] }; ordem.push(chave);
       }
-      mapa[chave].itens.push({ dia: i.dia, sistema: i.sistema || "", local: i.local || "", legenda: i.legenda || "", diagnostico: i.diagnostico || "", orientacao: i.orientacao || "" });
+      mapa[chave].itens.push({ dia: i.dia, sistema: i.sistema || "", local: i.local || "", legenda: i.herdada ? "" : (i.legenda || ""), diagnostico: i.diagnostico || "", orientacao: i.orientacao || "" });
     });
     if (modo !== "sistema") ordem.sort();
     return ordem.map(function (c) { return mapa[c]; });
@@ -852,24 +871,29 @@
     if (!pags.length) { R.aviso = "Não há fotos enviadas, marcadas para o relatório, nesse período."; render(); return; }
     try {
       var resumos = {}, base = pags.map(function (p) {
-        return { chave: p.chave, fotos: p.fotos.map(function (f, k) { return { n: k + 1, sistema: f.sistema || "", local: f.local || "", legenda: f.legenda || "" }; }) };
+        return { chave: p.chave, fotos: p.fotos.map(function (f, k) { return { n: k + 1, sistema: f.sistema || "", local: f.local || "", legenda: f.legenda || "", repete: !!f.herdada }; }) };
       });
-      for (var k = 0; k < base.length; k += 40) {
-        R.ocupado = "Resumindo as legendas das páginas (" + Math.min(k + 40, base.length) + " de " + base.length + ")..."; render();
-        var a = await chamarIA("resumos", { paginas: base.slice(k, k + 40) });
+      for (var k = 0; k < base.length; k += 10) {
+        R.ocupado = "Resumindo as legendas das páginas (" + Math.min(k + 10, base.length) + " de " + base.length + ")..."; render();
+        var a = await chamarIA("resumos", { paginas: base.slice(k, k + 10) });
         a.resultado.resumos.forEach(function (x) { resumos[x.chave] = x.resumo; });
         somarUso(R, a.uso);
       }
-      R.ocupado = "Redigindo o item 3..."; render();
       var cli = obra.cliente || "";
-      var b = await chamarIA("item3", {
-        modelo: { id: modelo.id, nome: modelo.nome, rotulo_item3: modelo.rotulo_item3, rotulo_item4: modelo.rotulo_item4, instrucoes_ia: modelo.instrucoes_ia },
-        relatorio: { cliente: cli, objetivo: obra.objetivo || "", nome_obra: obra.nome_no_texto || obra.nome_exibicao, tema: R.tema, descricao: R.descricao,
-          periodo: dataBR(R.de) + " a " + dataBR(R.ate), usar_item4: R.usar_item4 },
-        grupos: grupos
-      });
-      somarUso(R, b.uso);
-      var res = b.resultado, avisos = [];
+      var res = { secoes: [], pendencias: [] };
+      for (var gi = 0; gi < grupos.length; gi++) {
+        R.ocupado = "Redigindo o item 3 (" + (gi + 1) + " de " + grupos.length + ")..."; render();
+        var b = await chamarIA("item3", {
+          modelo: { id: modelo.id, nome: modelo.nome, rotulo_item3: modelo.rotulo_item3, rotulo_item4: modelo.rotulo_item4, instrucoes_ia: modelo.instrucoes_ia },
+          relatorio: { cliente: cli, objetivo: obra.objetivo || "", nome_obra: obra.nome_no_texto || obra.nome_exibicao, tema: R.tema, descricao: R.descricao,
+            periodo: dataBR(R.de) + " a " + dataBR(R.ate), usar_item4: R.usar_item4 },
+          grupos: [grupos[gi]]
+        });
+        somarUso(R, b.uso);
+        res.secoes = res.secoes.concat(b.resultado.secoes || []);
+        res.pendencias = res.pendencias.concat(b.resultado.pendencias || []);
+      }
+      var avisos = [];
       var funcaoAntiga = res.secoes.length > 0 && res.secoes.every(function (x) { return x.orientacoes === undefined; });
       if (funcaoAntiga) avisos.push("A função da IA publicada no Supabase está na versão anterior. Publique a versão nova do arquivo funcao_gerar-texto.ts e gere de novo.");
       R.conteudo = {
@@ -942,8 +966,8 @@
                 render(); }); } }, S.confirmar === chave ? "Confirmar?" : "Excluir") : null));
         }) : h("p", { class: "mut" }, "Nenhum relatório criado para esta obra ainda."));
     }
-    var modelo = modeloDe(R.modelo_id), pags = paginasDoPeriodo(R.de, R.ate), semLeg = 0;
-    pags.forEach(function (p) { p.fotos.forEach(function (f) { if (!(f.legenda || "").trim()) semLeg++; }); });
+    var modelo = modeloDe(R.modelo_id), pags = paginasDoPeriodo(R.de, R.ate), semLeg = 0, repetem = 0;
+    pags.forEach(function (p) { p.fotos.forEach(function (f) { if (f.herdada) repetem++; else if (!(f.legenda || "").trim()) semLeg++; }); });
     var customs = S.modelos.filter(function (m) { return !m.sistema && m.ativo !== false; });
     function botaoTipo(rot, ativo, fn) { return h("button", { class: "bt pe" + (ativo ? "" : " sec"), onclick: fn }, rot); }
     var ehOutros = R.outros || (modelo && !modelo.sistema);
@@ -978,10 +1002,11 @@
       }
     }
     var cartaoDados = h("div", { class: "cartao" }, h("h2", {}, "Período e dados"),
-      h("div", { class: "linha" }, ligado("De", R, "de", { tipo: "date", aoMudar: function () { } }), ligado("Até", R, "ate", { tipo: "date", aoMudar: function () { } })),
+      h("div", { class: "linha" }, ligado("De", R, "de", { tipo: "date", aoMudar: function () { render(); } }), ligado("Até", R, "ate", { tipo: "date", aoMudar: function () { render(); } })),
       modelo && !modelo.inclui_periodo ? ligado("Tema da vistoria (subtítulo da capa)", R, "tema") : null,
       ligado("Incluir item 4, proposta de correção (marque quando houver prescrição de reparo). As orientações ditadas só entram no relatório com o item 4 ligado.", R, "usar_item4", { tipo: "check" }),
-      h("p", { class: "mut" }, pags.length + " página(s) de fotos no período" + (semLeg ? ", " + semLeg + " foto(s) sem legenda" : "") + ". Fotos ainda não enviadas ficam de fora."));
+      h("p", { class: "mut" }, pags.length + " página(s) de fotos no período" + (repetem ? ", " + repetem + " foto(s) repetem a legenda da anterior" : "") + (semLeg ? ", " + semLeg + " foto(s) sem legenda (primeira do dia)" : "") + ". Fotos ainda não enviadas ficam de fora."),
+      (parseDia(R.ate) - parseDia(R.de)) / 86400000 > 45 ? h("div", { class: "aviso" }, "Período maior que 45 dias. Para o relatório mensal, use De e Até dentro do mês desejado.") : null);
     var chaveGer = "ger" + (R.id || "novo"), temTexto = R.conteudo.secoes.length || Object.keys(R.conteudo.resumos).length;
     var bGerar = h("button", { class: "bt", disabled: !!R.ocupado || !S.online || !modelo, onclick: function () {
       if (temTexto) confirmar(chaveGer, gerarRascunho); else gerarRascunho(); } },
