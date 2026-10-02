@@ -1,5 +1,5 @@
 // Service worker: guarda o app no aparelho para abrir sem internet.
-const VERSAO = "v1.3.3";
+const VERSAO = "v1.3.4";
 const CACHE = "vistoria-" + VERSAO;
 const ARQUIVOS = ["./", "./index.html", "./style.css", "./app.js", "./config.js", "./manifest.webmanifest",
   "./vendor/supabase.js", "./vendor/jszip.min.js",

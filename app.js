@@ -839,7 +839,7 @@
   function pendentes(txt) { return ((txt || "").match(/\[A CONFIRMAR\]/g) || []).length; }
   function dadosRel(R) {
     return { obra_id: S.obraId, modelo_id: R.modelo_id, periodo_ini: R.de, periodo_fim: R.ate, tema: R.tema, descricao: R.descricao,
-      usar_item4: R.usar_item4, conteudo: R.conteudo, uso_ia: R.uso_ia };
+      usar_item4: !!R.usar_item4 && R.modelo_id !== "fiscalizacao", conteudo: R.conteudo, uso_ia: R.uso_ia };
   }
   async function salvarRel(aprovar) {
     var R = S.rel;
@@ -886,7 +886,7 @@
         var b = await chamarIA("item3", {
           modelo: { id: modelo.id, nome: modelo.nome, rotulo_item3: modelo.rotulo_item3, rotulo_item4: modelo.rotulo_item4, instrucoes_ia: modelo.instrucoes_ia },
           relatorio: { cliente: cli, objetivo: obra.objetivo || "", nome_obra: obra.nome_no_texto || obra.nome_exibicao, tema: R.tema, descricao: R.descricao,
-            periodo: dataBR(R.de) + " a " + dataBR(R.ate), usar_item4: R.usar_item4 },
+            periodo: dataBR(R.de) + " a " + dataBR(R.ate), usar_item4: R.usar_item4 && modelo.id !== "fiscalizacao" },
           grupos: [grupos[gi]]
         });
         somarUso(R, b.uso);
@@ -901,7 +901,7 @@
         secoes: grupos.map(function (g) {
           var s = res.secoes.find(function (x) { return x.chave === g.chave; });
           return { chave: g.chave, titulo: g.titulo, texto: s && s.texto ? s.texto : "[A CONFIRMAR]",
-            orientacoes: R.usar_item4 ? orientacoesDoGrupo(s, g, avisos) : "" };
+            orientacoes: (R.usar_item4 && modelo.id !== "fiscalizacao") ? orientacoesDoGrupo(s, g, avisos) : "" };
         }),
         pendencias: (res.pendencias || []).concat(avisos)
       };
@@ -1004,7 +1004,9 @@
     var cartaoDados = h("div", { class: "cartao" }, h("h2", {}, "Período e dados"),
       h("div", { class: "linha" }, ligado("De", R, "de", { tipo: "date", aoMudar: function () { render(); } }), ligado("Até", R, "ate", { tipo: "date", aoMudar: function () { render(); } })),
       modelo && !modelo.inclui_periodo ? ligado("Tema da vistoria (subtítulo da capa)", R, "tema") : null,
-      ligado("Incluir item 4, proposta de correção (marque quando houver prescrição de reparo). As orientações ditadas só entram no relatório com o item 4 ligado.", R, "usar_item4", { tipo: "check" }),
+      (modelo && modelo.id === "fiscalizacao")
+        ? h("p", { class: "mut" }, "Fiscalização: as orientações ditadas entram como texto corrido no item 3. Este tipo de relatório não tem item 4.")
+        : ligado("Incluir item 4, proposta de correção (marque quando houver prescrição de reparo). As orientações ditadas só entram no relatório com o item 4 ligado.", R, "usar_item4", { tipo: "check" }),
       h("p", { class: "mut" }, pags.length + " página(s) de fotos no período" + (repetem ? ", " + repetem + " foto(s) repetem a legenda da anterior" : "") + (semLeg ? ", " + semLeg + " foto(s) sem legenda (primeira do dia)" : "") + ". Fotos ainda não enviadas ficam de fora."),
       (parseDia(R.ate) - parseDia(R.de)) / 86400000 > 45 ? h("div", { class: "aviso" }, "Período maior que 45 dias. Para o relatório mensal, use De e Até dentro do mês desejado.") : null);
     var chaveGer = "ger" + (R.id || "novo"), temTexto = R.conteudo.secoes.length || Object.keys(R.conteudo.resumos).length;
@@ -1033,7 +1035,7 @@
           h("input", { type: "text", value: s.titulo || "", "aria-label": "Título do subitem", oninput: function (e) { s.titulo = e.target.value; } }),
           h("textarea", { rows: 6, value: s.texto || "", oninput: function (e) { s.texto = e.target.value; } })));
       });
-      if (R.usar_item4) {
+      if (R.usar_item4 && !(modelo && modelo.id === "fiscalizacao")) {
         c3.push(h("h2", { style: "margin-top:16px" }, "Item 4: " + (modelo ? modelo.rotulo_item4 : "Proposta de correção")));
         var ditas = {};
         gruposDoPeriodo(modelo, R.de, R.ate).forEach(function (g) { ditas[g.chave] = g.itens.filter(function (x) { return (x.orientacao || "").trim(); }).length; });
@@ -1051,7 +1053,7 @@
           h("button", { class: "bt sec", disabled: !S.online, onclick: function () { salvarRel(false); } }, "Salvar rascunho"),
           h("button", { class: "bt", disabled: !S.online, onclick: function () { salvarRel(true); } }, "Aprovar")),
         h("button", { class: "bt sec", style: "margin-top:8px", disabled: !!S.exportando || !S.online,
-          onclick: function () { exportar(R.de, R.ate, { status: R.status, modelo_id: R.modelo_id, tema: R.tema, periodo_ini: R.de, periodo_fim: R.ate, usar_item4: R.usar_item4, conteudo: R.conteudo }); } },
+          onclick: function () { exportar(R.de, R.ate, { status: R.status, modelo_id: R.modelo_id, tema: R.tema, periodo_ini: R.de, periodo_fim: R.ate, usar_item4: !!R.usar_item4 && R.modelo_id !== "fiscalizacao", conteudo: R.conteudo }); } },
           S.exportando || "Baixar pacote com este relatório (.zip)"),
         h("p", { class: "mut" }, "O pacote leva as fotos, as legendas, os textos desta tela e o cadastro da obra, para gerar o .docx.")));
     }
