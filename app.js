@@ -13,7 +13,8 @@
     sb: null, user: null, perfil: null, obras: [], clientes: [], perfis: [], logos: {}, clienteSel: null, obraSel: null, menuAberto: false, obraId: null, regs: [], fila: [], edicoes: {},
     minis: new Map(), aba: "inicio", online: navigator.onLine, sincronizando: false, precisaLogin: false,
     mes: new Date(), diaSel: null, msg: "", obraEdit: null, exportando: "", confirmar: null, carregou: false,
-    modelos: [], relatorios: [], semScript04: false, rel: null
+    modelos: [], relatorios: [], semScript04: false, rel: null,
+    passo: "tipos", tipoSel: null, temTipo: false, novoId: null
   };
   var idb = null, pendRender = false, timerRefresh = null;
   var app = document.getElementById("app");
@@ -166,8 +167,11 @@
     c = await dbGet("cache", "modelos"); if (c) S.modelos = c.v;
     c = await dbGet("cache", "relatorios"); if (c) S.relatorios = c.v;
     (await dbTodos("minis")).forEach(function (m) { S.minis.set(m.id, URL.createObjectURL(m.blob)); });
+    S.temTipo = guardado("temTipo") === "1";
+    S.tipoSel = guardado("tipoSel") || null;
     var guardada = guardado("obra");
     S.obraId = (S.obras.some(function (o) { return o.id === guardada; }) ? guardada : (S.obras[0] && S.obras[0].id)) || null;
+    S.passo = guardado("passo") === "registros" && S.obraId ? "registros" : "tipos";
   }
 
   async function paginar(consulta) {
@@ -191,6 +195,8 @@
       var clientes = await paginar(function () { return S.sb.from("clientes").select("*").order("razao_social"); });
       var perfis = await paginar(function () { return S.sb.from("perfis").select("*").order("email"); });
       S.obras = obras; S.perfil = perfil.data || S.perfil; S.regs = regs; S.clientes = clientes; S.perfis = perfis;
+      try { var sonda = await S.sb.from("obras").select("tipo_vistoria").limit(1); S.temTipo = !sonda.error; } catch (e0) { S.temTipo = false; }
+      guardado("temTipo", S.temTipo ? "1" : "0");
       try {
         S.modelos = await paginar(function () { return S.sb.from("modelos_relatorio").select("*").order("criado_em"); });
         S.relatorios = await paginar(function () { return S.sb.from("relatorios").select("*").order("atualizado_em", { ascending: false }); });
@@ -312,6 +318,8 @@
       } catch (e) { S.msg = "Falha ao processar a foto: " + msgErro(e); }
     }
     S.msg = "";
+    var novos = S.fila.filter(function (x) { return x.obra_id === S.obraId; }).sort(function (a, b) { return new Date(b.ts) - new Date(a.ts); });
+    S.novoId = novos[0] ? novos[0].id : null;
     render();
     sincronizar();
   }
@@ -439,6 +447,7 @@
     { sec: "SISTEMA", itens: [{ id: "usuarios", rot: "Usuários", admin: 1 }, { id: "conta", rot: "Conta" }] }
   ];
   var ROTAS_OBRA = { regs: 1, painel: 1, relatorios: 1 };
+  function comSeletorObra() { return ROTAS_OBRA[S.aba] && (S.aba !== "regs" || S.passo === "registros"); }
   function temModulo(m) {
     if (!m || !S.perfil) return true;
     return S.perfil.papel === "admin" || (S.perfil.modulos || []).indexOf(m) >= 0;
@@ -461,7 +470,7 @@
       if (!itens.length) return;
       blocos.push(h("div", { class: "sec" }, sec.sec));
       itens.forEach(function (i) {
-        blocos.push(h("button", { class: "item" + (S.aba === i.id ? " at" : ""), onclick: function () { irPara(i.id); } }, i.rot, i.breve ? h("span", { class: "breve" }, "em breve") : null));
+        blocos.push(h("button", { class: "item" + (S.aba === i.id ? " at" : ""), onclick: function () { if (i.id === "regs") { S.passo = "tipos"; guardado("passo", "tipos"); } irPara(i.id); } }, i.rot, i.breve ? h("span", { class: "breve" }, "em breve") : null));
       });
     });
     return h("aside", { class: "lateral" + (S.menuAberto ? " aberta" : "") },
@@ -470,10 +479,10 @@
       h("div", { class: "usuario" }, S.user ? S.user.email : "", h("br"), h("small", {}, S.perfil ? S.perfil.papel : "")));
   }
   function cabecalho() {
-    var pend = S.fila.length, comObra = ROTAS_OBRA[S.aba];
+    var pend = S.fila.length, comObra = comSeletorObra();
     return h("header", {},
       h("button", { class: "hamb", "aria-label": "Menu", onclick: function () { S.menuAberto = !S.menuAberto; render(); } }, "☰"),
-      h("strong", { class: "tit" + (comObra ? " curto" : "") }, tituloDe(S.aba)),
+      h("strong", { class: "tit" + (comObra ? " curto" : "") }, S.aba === "regs" ? "Vistoria" : tituloDe(S.aba)),
       comObra ? h("select", {
         "aria-label": "Obra", onchange: function (e) { S.obraId = e.target.value; guardado("obra", S.obraId); S.rel = null; render(); }
       }, S.obras.filter(function (o) { return o.ativa !== false || o.id === S.obraId; }).map(function (o) { return h("option", { value: o.id, selected: o.id === S.obraId ? "" : null }, o.nome_exibicao); })) : h("span", { class: "esp" }),
@@ -481,7 +490,7 @@
   }
   function navegacao() {
     var abas = [];
-    if (temModulo("vistoria")) abas.push(["regs", "Registros"], ["painel", "Painel"]); else abas.push(["inicio", "Início"]);
+    if (temModulo("vistoria")) abas.push(["regs", "Vistoria"], ["painel", "Painel"]); else abas.push(["inicio", "Início"]);
     var nav = h("nav", {}, abas.map(function (a) {
       return h("button", { class: S.aba === a[0] ? "at" : "", onclick: function () { irPara(a[0]); } }, a[1]);
     }));
@@ -518,7 +527,7 @@
       onblur: function (e) { clearTimeout(ta._t); editarCampo(it, "legenda", e.target.value); }
     });
     var chave = "rm" + it.id;
-    return h("div", { class: "cartao reg" },
+    return h("div", { class: "cartao reg", id: "reg-" + it.id },
       url ? h("img", { class: "mini", src: url, alt: "Foto", onclick: function () { abrirVisor(it); } }) : h("div", { class: "mini", onclick: function () { abrirVisor(it); } }, "foto"),
       h("div", {},
         h("div", { class: "meta" }, hora(it.ts), tag, it.estado === "falha" && it.erro ? h("span", { class: "erro" }, it.erro) : null),
@@ -537,6 +546,49 @@
           (it._pend || ehAdmin()) ? h("button", { class: "bt sec pe perigo", onclick: function () { confirmar(chave, function () { remover(it); }); } }, S.confirmar === chave ? "Confirmar?" : "Remover") : null)));
   }
 
+  // ---------------------------------------------------------------- Vistoria: tipo > obra > registros de campo
+  function ultimaVistoria(obraId) {
+    var d = "";
+    S.regs.forEach(function (r) { if (r.obra_id === obraId && r.dia > d) d = r.dia; });
+    S.fila.forEach(function (r) { if (r.obra_id === obraId && r.dia > d) d = r.dia; });
+    return d;
+  }
+  function irParaPasso(p) { S.passo = p; guardado("passo", p); S.msg = ""; render(); window.scrollTo(0, 0); }
+  function abrirObra(o) {
+    S.obraId = o.id; guardado("obra", o.id); S.rel = null; irParaPasso("registros");
+  }
+  function telaVistoria() {
+    if (S.passo === "registros" && obraAtual()) return telaRegistros();
+    var ativas = S.obras.filter(function (o) { return o.ativa !== false; });
+    if (S.passo === "obras" && S.tipoSel) {
+      var tipo = TIPOS.find(function (t) { return t.id === S.tipoSel; }) || TIPOS[1];
+      var lista = ativas.filter(function (o) { return tipoDe(o) === tipo.id; });
+      return h("main", {},
+        h("button", { class: "bt sec pe", onclick: function () { irParaPasso("tipos"); } }, "‹ Tipos de vistoria"),
+        h("h2", {}, tipo.rot),
+        !S.temTipo && tipo.id !== "fiscalizacao" ? h("div", { class: "aviso" }, "Para separar as obras por tipo, rode o script 05 no Supabase e escolha o tipo em Clientes e obras.") : null,
+        lista.length ? lista.map(function (o) {
+          var ult = ultimaVistoria(o.id), pend = S.fila.filter(function (p) { return p.obra_id === o.id; }).length, cli = S.clientes.find(function (c) { return c.id === o.cliente_id; });
+          var logo = cli && S.logos[cli.id];
+          return h("div", { class: "cartao obra-sel", onclick: function () { abrirObra(o); } },
+            logo ? h("img", { class: "logo-c", src: logo, alt: "" }) : h("div", { class: "logo-c ini" }, (o.nome_exibicao || "?").charAt(0)),
+            h("div", { class: "ob-txt" }, h("strong", {}, o.nome_exibicao), h("div", { class: "mut" }, (o.cliente || "") + (ult ? " · última vistoria " + dataBR(ult).slice(0, 5) : " · sem fotos ainda")),
+              pend ? h("span", { class: "tag pen" }, pend + " a enviar") : null),
+            h("span", { class: "seta" }, "›"));
+        }) : h("p", { class: "mut" }, "Nenhuma obra ativa neste tipo. Cadastre ou ative em Clientes e obras."));
+    }
+    return h("main", {},
+      S.msg ? h("div", { class: "aviso" }, S.msg) : null,
+      h("h2", {}, "Vistoria"),
+      h("p", { class: "mut" }, "Escolha o tipo de serviço."),
+      TIPOS.map(function (t) {
+        var n = ativas.filter(function (o) { return tipoDe(o) === t.id; }).length;
+        return h("div", { class: "cartao obra-sel", onclick: function () { S.tipoSel = t.id; guardado("tipoSel", t.id); irParaPasso("obras"); } },
+          h("div", { class: "ob-txt" }, h("strong", {}, t.rot), h("div", { class: "mut" }, n + (n === 1 ? " obra ativa" : " obras ativas"))),
+          h("span", { class: "seta" }, "›"));
+      }));
+  }
+
   function telaRegistros() {
     var itens = itensDaObra(), semanas = {};
     itens.forEach(function (it) { ((semanas[it.semana] = semanas[it.semana] || {})[it.dia] = semanas[it.semana][it.dia] || []).push(it); });
@@ -546,7 +598,7 @@
         h("button", { onclick: function () { exportar(seg, diaDe(new Date(sexta(seg).getTime() + 2 * 86400000))); }, disabled: !!S.exportando }, "Exportar semana")));
       Object.keys(semanas[seg]).sort().reverse().forEach(function (dia) {
         blocos.push(h("div", { class: "dia" }, rotuloDia(dia) + " (" + semanas[seg][dia].length + ")"));
-        semanas[seg][dia].forEach(function (it) { blocos.push(cartaoRegistro(it)); });
+        semanas[seg][dia].slice().reverse().forEach(function (it) { blocos.push(cartaoRegistro(it)); });   // mais recente primeiro
       });
     });
     var usados = {};
@@ -555,8 +607,10 @@
     var dl = h("datalist", { id: "lista-sistemas" }, Object.keys(usados).sort().map(function (x) { return h("option", { value: x }); }));
     var cam = h("input", { type: "file", accept: "image/*", capture: "environment", multiple: true, hidden: true, onchange: aoCapturar });
     var gal = h("input", { type: "file", accept: "image/*", multiple: true, hidden: true, onchange: aoCapturar });
+    var ob = obraAtual();
     return h("main", {},
       S.msg ? h("div", { class: "aviso" }, S.msg) : null,
+      h("button", { class: "bt sec pe", onclick: function () { irParaPasso(S.tipoSel ? "obras" : "tipos"); } }, "‹ Trocar obra" + (ob ? " (" + ob.nome_exibicao + ")" : "")),
       S.semScript04 ? h("div", { class: "aviso" }, "Sistema, diagnóstico e orientação ainda não são salvos na nuvem: falta rodar o script 04 no Supabase. Até lá, a foto e a legenda continuam sendo enviadas normalmente.") : null,
       dl,
       h("div", { class: "linha" },
@@ -959,12 +1013,18 @@
     ["objetivo", "Objetivo da vistoria (item 1 do relatório)", "textarea"], ["legenda_mapa", "Legenda do mapa (Figura 1)", "text"],
     ["texto_item3", "Texto de abertura do item 3 ({nome_no_texto} é substituído)", "textarea"]
   ];
+  var TIPOS = [{ id: "consultoria", rot: "Consultoria Técnica" }, { id: "fiscalizacao", rot: "Fiscalização de obra" }, { id: "outros", rot: "Outros tipos" }];
+  function tipoDe(o) { return (o && o.tipo_vistoria) || "fiscalizacao"; }
+  function defObra() {
+    if (!S.temTipo) return DEF_OBRA;
+    return [DEF_OBRA[0], DEF_OBRA[1], ["tipo_vistoria", "Tipo de vistoria", "select", 1, TIPOS.map(function (t) { return [t.id, t.rot]; })]].concat(DEF_OBRA.slice(2));
+  }
   function slug(t) { return (t || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "obra"; }
   function campoForm(def, valor) {
     var el;
     if (def[2] === "textarea") { el = h("textarea", { rows: 3 }); el.value = valor || ""; }
     else if (def[2] === "select") {
-      el = h("select", {}, [h("option", { value: "" }, "Selecione")].concat(def[4].map(function (o) { return h("option", { value: o }, o); })));
+      el = h("select", {}, [h("option", { value: "" }, "Selecione")].concat(def[4].map(function (o) { return Array.isArray(o) ? h("option", { value: o[0] }, o[1]) : h("option", { value: o }, o); })));
       el.value = valor || "";
     } else { el = h("input", { type: def[2] || "text" }); el.value = valor || ""; }
     el.setAttribute("data-f", def[0]);
@@ -1052,11 +1112,12 @@
     var novo = S.obraSel === "nova", cli = S.clientes.find(function (x) { return x.id === S.clienteSel; }) || {};
     var o = novo ? { titulo_relatorio: "RELATÓRIO DE FISCALIZAÇÃO DE OBRA", legenda_mapa: "Figura 1: Localização da edificação objeto da vistoria.", cidade_assinatura: "", ativa: true,
       texto_item3: "O presente relatório tem por objetivo acompanhar e documentar, por meio de inspeção visual e registro fotográfico, os serviços em execução no {nome_no_texto}, ", objetivo: "Fiscalização da obra." } : (S.obras.find(function (x) { return x.id === S.obraSel; }) || {});
-    var form = montarForm(DEF_OBRA, o), capa = h("input", { type: "file", accept: "image/jpeg,image/png" }), mapa = h("input", { type: "file", accept: "image/jpeg,image/png" });
+    var form = montarForm(defObra(), o), capa = h("input", { type: "file", accept: "image/jpeg,image/png" }), mapa = h("input", { type: "file", accept: "image/jpeg,image/png" });
     var ativa = h("input", { type: "checkbox", "data-f": "ativa" }); ativa.checked = o.ativa !== false;
     async function salvar() {
       if (exigeOnline()) return;
       var reg = form.ler();
+      if (S.temTipo && !reg.tipo_vistoria) reg.tipo_vistoria = "fiscalizacao";
       if (!reg.nome_exibicao || !reg.nome_no_texto || !reg.titulo_relatorio || !reg.localizacao) { S.msg = "Preencha os campos obrigatórios (*)."; render(); return; }
       reg.numero_contrato = reg.numero_contrato || null; reg.escopo = reg.escopo || null; reg.periodicidade = reg.periodicidade || null;
       reg.ativa = ativa.checked; reg.cliente_id = cli.id; reg.cliente = (cli.razao_social || "").toUpperCase();
@@ -1160,7 +1221,7 @@
     var id = S.aba;
     if (id === "inicio") tela = telaInicio();
     else if (id === "painel" && temModulo("vistoria")) tela = telaPainel();
-    else if (id === "regs" && temModulo("vistoria")) tela = telaRegistros();
+    else if (id === "regs" && temModulo("vistoria")) tela = telaVistoria();
     else if (id === "relatorios" && temModulo("vistoria")) tela = telaRelatorios();
     else if (id === "clientes" && temModulo("vistoria")) tela = telaClientes();
     else if (id === "usuarios" && ehAdmin()) tela = telaUsuarios();
@@ -1171,6 +1232,14 @@
       h("div", { class: "vel" + (S.menuAberto ? " on" : ""), onclick: function () { S.menuAberto = false; render(); } }),
       h("div", { class: "conteudo" }, cabecalho(), tela, navegacao())));
     window.scrollTo(0, y);
+    if (S.novoId && id === "regs") {
+      var alvo = document.getElementById("reg-" + S.novoId);
+      if (alvo) {
+        var topo = alvo.getBoundingClientRect().top + window.scrollY - 64;
+        window.scrollTo(0, Math.max(0, topo)); alvo.classList.add("novo"); S.novoId = null;
+        setTimeout(function () { alvo.classList.remove("novo"); }, 4000);
+      }
+    }
   }
     document.addEventListener("focusout", function () { setTimeout(function () { if (pendRender) render(); }, 150); });
 

@@ -111,3 +111,8 @@ header .tit{flex:1}
 .faixa img{height:56px;width:auto;border-radius:6px;border:1px solid var(--line)}
 .mini-vz{display:inline-flex;align-items:center;justify-content:center;height:56px;min-width:56px;border:1px dashed var(--line);border-radius:6px;font-size:10px;color:var(--mut)}
 .prop{border-top:1px dashed var(--line);margin-top:12px;padding-top:8px}
+.obra-sel{display:flex;gap:12px;align-items:center;cursor:pointer;padding:16px}
+.obra-sel .ob-txt{flex:1;min-width:0}
+.obra-sel .ob-txt strong{font-size:16px}
+.obra-sel .seta{font-size:26px;color:var(--cinza);line-height:1}
+.cartao.reg.novo{outline:3px solid var(--acc);outline-offset:-1px}
