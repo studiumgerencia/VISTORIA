@@ -167,7 +167,7 @@
     c = await dbGet("cache", "modelos"); if (c) S.modelos = c.v;
     c = await dbGet("cache", "relatorios"); if (c) S.relatorios = c.v;
     (await dbTodos("minis")).forEach(function (m) { S.minis.set(m.id, URL.createObjectURL(m.blob)); });
-    S.temTipo = guardado("temTipo") === "1";
+    S.temTipo = guardado("temTipo") === "1"; S.temFicha = guardado("temFicha") === "1";
     S.tipoSel = guardado("tipoSel") || null;
     var guardada = guardado("obra");
     S.obraId = (S.obras.some(function (o) { return o.id === guardada; }) ? guardada : (S.obras[0] && S.obras[0].id)) || null;
@@ -197,6 +197,7 @@
       S.obras = obras; S.perfil = perfil.data || S.perfil; S.regs = regs; S.clientes = clientes; S.perfis = perfis;
       try { var sonda = await S.sb.from("obras").select("tipo_vistoria").limit(1); S.temTipo = !sonda.error; } catch (e0) { S.temTipo = false; }
       guardado("temTipo", S.temTipo ? "1" : "0");
+      try { var sonda2 = await S.sb.from("obras").select("ficha").limit(1); S.temFicha = !sonda2.error; guardado("temFicha", S.temFicha ? "1" : "0"); } catch (e1) { S.temFicha = false; }
       try {
         S.modelos = await paginar(function () { return S.sb.from("modelos_relatorio").select("*").order("criado_em"); });
         S.relatorios = await paginar(function () { return S.sb.from("relatorios").select("*").order("atualizado_em", { ascending: false }); });
@@ -443,11 +444,12 @@
         usar_item4: rel.usar_item4, conteudo: rel.conteudo
       }, null, 2));
     }
-    for (var q = 0; q < 2; q++) {
-      var cam = q ? obra.imagem_mapa : obra.imagem_capa;
+    var imgs = [["capa", obra.imagem_capa], ["mapa", obra.imagem_mapa], ["logo", (obra.ficha || {}).logo_path], ["fig1", (obra.ficha || {}).fig1_path], ["fig2", (obra.ficha || {}).fig2_path]];
+    for (var q = 0; q < imgs.length; q++) {
+      var cam = imgs[q][1];
       if (!cam) continue;
       var u = await S.sb.storage.from("fotos").createSignedUrl(cam, 600);
-      if (u.data) { try { zip.file("obra/" + (q ? "mapa" : "capa") + cam.slice(cam.lastIndexOf(".")), await (await fetch(u.data.signedUrl)).blob()); } catch (e) { /* segue */ } }
+      if (u.data) { try { zip.file("obra/" + imgs[q][0] + cam.slice(cam.lastIndexOf(".")), await (await fetch(u.data.signedUrl)).blob()); } catch (e) { /* segue */ } }
     }
     S.exportando = "Compactando..."; render();
     var blob = await zip.generateAsync({ type: "blob", compression: "STORE" });
@@ -762,7 +764,8 @@
   function novoRel() {
     var itens = itensDaObra().filter(function (i) { return !i._pend; }), ult = itens.length ? itens[itens.length - 1] : null;
     var seg = ult ? ult.semana : diaDe(segundaDe(diaDe(new Date())));
-    return { id: null, modelo_id: modeloDe("fiscalizacao") ? "fiscalizacao" : (S.modelos[0] ? S.modelos[0].id : null), outros: false,
+    var ob = obraAtual(), padrao = (ob && ob.tipo_vistoria === "obra" && modeloDe("obra-e5")) ? "obra-e5" : (modeloDe("fiscalizacao") ? "fiscalizacao" : (S.modelos[0] ? S.modelos[0].id : null));
+    return { id: null, modelo_id: padrao, outros: false,
       de: seg, ate: diaDe(sexta(seg)), tema: "", descricao: "", usar_item4: false, status: "rascunho",
       conteudo: { resumos: {}, secoes: [], pendencias: [] }, uso_ia: {}, ocupado: "", prop: null, aviso: "" };
   }
@@ -837,9 +840,52 @@
     return t;
   }
   function pendentes(txt) { return ((txt || "").match(/\[A CONFIRMAR\]/g) || []).length; }
+  var LIMITE_CHUVA_MM = 1;
+  async function buscarChuva() {
+    var R = S.rel, obra = obraAtual(), f = (obra && obra.ficha) || {};
+    var lat = parseFloat(String(f.lat || "").replace(",", ".")), lon = parseFloat(String(f.lon || "").replace(",", "."));
+    if (isNaN(lat) || isNaN(lon)) { R.aviso = "Informe latitude e longitude da obra em Clientes e obras para buscar a chuva."; render(); return; }
+    var p = R.ate.split("-"), ano = +p[0], mes = +p[1], ultimo = new Date(ano, mes, 0).getDate();
+    var ini = ano + "-" + pad(mes) + "-01", fim = ano + "-" + pad(mes) + "-" + pad(ultimo), ontem = diaDe(new Date(Date.now() - 86400000));
+    if (fim > ontem) fim = ontem;
+    if (fim < ini) { R.aviso = "O mês do relatório ainda não tem dias fechados."; render(); return; }
+    try {
+      R.ocupado = "Buscando a chuva do mês..."; render();
+      var q = "latitude=" + lat + "&longitude=" + lon + "&daily=precipitation_sum&timezone=America%2FSao_Paulo";
+      var mm = {};
+      var r1 = await fetch("https://archive-api.open-meteo.com/v1/archive?" + q + "&start_date=" + ini + "&end_date=" + fim);
+      if (r1.ok) { var j1 = await r1.json(); (j1.daily.time || []).forEach(function (d, i) { if (j1.daily.precipitation_sum[i] != null) mm[d] = j1.daily.precipitation_sum[i]; }); }
+      var faltam = false, d0 = parseDia(ini);
+      for (var d = d0; diaDe(d) <= fim; d.setDate(d.getDate() + 1)) if (mm[diaDe(d)] === undefined) faltam = true;
+      if (faltam) {
+        var r2 = await fetch("https://api.open-meteo.com/v1/forecast?" + q + "&past_days=60&forecast_days=1");
+        if (r2.ok) { var j2 = await r2.json(); (j2.daily.time || []).forEach(function (d, i) { if (mm[d] === undefined && d >= ini && d <= fim && j2.daily.precipitation_sum[i] != null) mm[d] = j2.daily.precipitation_sum[i]; }); }
+      }
+      var dias = {};
+      Object.keys(mm).sort().forEach(function (d) { dias[d] = mm[d] >= LIMITE_CHUVA_MM; });
+      if (!Object.keys(dias).length) throw new Error("a fonte não devolveu dados");
+      R.conteudo.chuva = { mes: ano + "-" + pad(mes), dias: dias, mm: mm, fonte: "Open-Meteo", limite_mm: LIMITE_CHUVA_MM };
+      R.ocupado = ""; R.aviso = "Chuva do mês carregada. Confira os dias e toque num dia para corrigir (azul = com chuva)."; render();
+    } catch (e) { R.ocupado = ""; R.aviso = "Não foi possível buscar a chuva: " + msgErro(e); render(); }
+  }
+  function cartaoChuva(R) {
+    var ch = R.conteudo.chuva, partes = [h("h2", {}, "Item 2: registros do mês relacionados ao tempo"),
+      h("button", { class: "bt sec", disabled: !!R.ocupado || !S.online, onclick: buscarChuva }, R.ocupado || (ch ? "Buscar a chuva de novo" : "Buscar chuva do mês"))];
+    if (ch && ch.dias) {
+      var ks = Object.keys(ch.dias).sort(), com = ks.filter(function (k) { return ch.dias[k]; }).length;
+      partes.push(h("p", { class: "mut" }, "Mês " + ch.mes + ": " + (ks.length - com) + " dia(s) sem chuva e " + com + " com chuva. Toque no dia para trocar."));
+      partes.push(h("div", { class: "faixa" }, ks.map(function (k) {
+        var mmd = ch.mm && ch.mm[k] != null ? " (" + ch.mm[k].toFixed(1) + " mm)" : "";
+        return h("button", { class: "bt pe" + (ch.dias[k] ? "" : " sec"), style: "flex:0 0 auto;min-width:44px;margin:2px", title: k + mmd,
+          onclick: function () { ch.dias[k] = !ch.dias[k]; render(); } }, String(+k.slice(8)));
+      })));
+    }
+    return h("div", { class: "cartao" }, partes);
+  }
+  function ehObraModelo(id) { var m = modeloDe(id); return !!(m && m.layout === "obra"); }
   function dadosRel(R) {
     return { obra_id: S.obraId, modelo_id: R.modelo_id, periodo_ini: R.de, periodo_fim: R.ate, tema: R.tema, descricao: R.descricao,
-      usar_item4: !!R.usar_item4 && R.modelo_id !== "fiscalizacao", conteudo: R.conteudo, uso_ia: R.uso_ia };
+      usar_item4: !!R.usar_item4 && R.modelo_id !== "fiscalizacao" && !ehObraModelo(R.modelo_id), conteudo: R.conteudo, uso_ia: R.uso_ia };
   }
   async function salvarRel(aprovar) {
     var R = S.rel;
@@ -873,7 +919,7 @@
       var resumos = {}, base = pags.map(function (p) {
         return { chave: p.chave, fotos: p.fotos.map(function (f, k) { return { n: k + 1, sistema: f.sistema || "", local: f.local || "", legenda: f.legenda || "", repete: !!f.herdada }; }) };
       });
-      for (var k = 0; k < base.length; k += 10) {
+      for (var k = 0; k < base.length && modelo.layout !== "obra"; k += 10) {
         R.ocupado = "Resumindo as legendas das páginas (" + Math.min(k + 10, base.length) + " de " + base.length + ")..."; render();
         var a = await chamarIA("resumos", { paginas: base.slice(k, k + 10) });
         a.resultado.resumos.forEach(function (x) { resumos[x.chave] = x.resumo; });
@@ -886,7 +932,7 @@
         var b = await chamarIA("item3", {
           modelo: { id: modelo.id, nome: modelo.nome, rotulo_item3: modelo.rotulo_item3, rotulo_item4: modelo.rotulo_item4, instrucoes_ia: modelo.instrucoes_ia },
           relatorio: { cliente: cli, objetivo: obra.objetivo || "", nome_obra: obra.nome_no_texto || obra.nome_exibicao, tema: R.tema, descricao: R.descricao,
-            periodo: dataBR(R.de) + " a " + dataBR(R.ate), usar_item4: R.usar_item4 && modelo.id !== "fiscalizacao" },
+            periodo: dataBR(R.de) + " a " + dataBR(R.ate), usar_item4: R.usar_item4 && modelo.id !== "fiscalizacao" && modelo.layout !== "obra" },
           grupos: [grupos[gi]]
         });
         somarUso(R, b.uso);
@@ -897,11 +943,12 @@
       var funcaoAntiga = res.secoes.length > 0 && res.secoes.every(function (x) { return x.orientacoes === undefined; });
       if (funcaoAntiga) avisos.push("A função da IA publicada no Supabase está na versão anterior. Publique a versão nova do arquivo funcao_gerar-texto.ts e gere de novo.");
       R.conteudo = {
+        chuva: R.conteudo.chuva,
         resumos: resumos,
         secoes: grupos.map(function (g) {
           var s = res.secoes.find(function (x) { return x.chave === g.chave; });
           return { chave: g.chave, titulo: g.titulo, texto: s && s.texto ? s.texto : "[A CONFIRMAR]",
-            orientacoes: (R.usar_item4 && modelo.id !== "fiscalizacao") ? orientacoesDoGrupo(s, g, avisos) : "" };
+            orientacoes: (R.usar_item4 && modelo.id !== "fiscalizacao" && modelo.layout !== "obra") ? orientacoesDoGrupo(s, g, avisos) : "" };
         }),
         pendencias: (res.pendencias || []).concat(avisos)
       };
@@ -970,12 +1017,13 @@
     pags.forEach(function (p) { p.fotos.forEach(function (f) { if (f.herdada) repetem++; else if (!(f.legenda || "").trim()) semLeg++; }); });
     var customs = S.modelos.filter(function (m) { return !m.sistema && m.ativo !== false; });
     function botaoTipo(rot, ativo, fn) { return h("button", { class: "bt pe" + (ativo ? "" : " sec"), onclick: fn }, rot); }
-    var ehOutros = R.outros || (modelo && !modelo.sistema);
+    var ehOutros = R.outros || (modelo && !modelo.sistema && modelo.layout !== "obra");
     var cartaoTipo = h("div", { class: "cartao" }, h("h2", {}, "Tipo de vistoria"),
       h("div", { class: "linha" },
         botaoTipo("Fiscalização", !ehOutros && R.modelo_id === "fiscalizacao", function () { R.modelo_id = "fiscalizacao"; R.outros = false; render(); }),
         botaoTipo("Consultoria", !ehOutros && R.modelo_id === "consultoria", function () { R.modelo_id = "consultoria"; R.outros = false; render(); }),
-        botaoTipo("Outros tipos", ehOutros, function () { R.outros = true; R.modelo_id = null; render(); })));
+        modeloDe("obra-e5") ? botaoTipo("Relatório de obra", R.modelo_id === "obra-e5", function () { R.modelo_id = "obra-e5"; R.outros = false; R.usar_item4 = false; render(); }) : null,
+        botaoTipo("Outros tipos", ehOutros && R.modelo_id !== "obra-e5", function () { R.outros = true; R.modelo_id = null; render(); })));
     if (ehOutros) {
       cartaoTipo.append(
         customs.length ? h("div", { class: "campo" }, h("label", {}, "Modelos de outros tipos já salvos"),
@@ -1004,7 +1052,7 @@
     var cartaoDados = h("div", { class: "cartao" }, h("h2", {}, "Período e dados"),
       h("div", { class: "linha" }, ligado("De", R, "de", { tipo: "date", aoMudar: function () { render(); } }), ligado("Até", R, "ate", { tipo: "date", aoMudar: function () { render(); } })),
       modelo && !modelo.inclui_periodo ? ligado("Tema da vistoria (subtítulo da capa)", R, "tema") : null,
-      (modelo && modelo.id === "fiscalizacao")
+      (modelo && modelo.layout === "obra") ? null : (modelo && modelo.id === "fiscalizacao")
         ? h("p", { class: "mut" }, "Fiscalização: as orientações ditadas entram como texto corrido no item 3. Este tipo de relatório não tem item 4.")
         : ligado("Incluir item 4, proposta de correção (marque quando houver prescrição de reparo). As orientações ditadas só entram no relatório com o item 4 ligado.", R, "usar_item4", { tipo: "check" }),
       h("p", { class: "mut" }, pags.length + " página(s) de fotos no período" + (repetem ? ", " + repetem + " foto(s) repetem a legenda da anterior" : "") + (semLeg ? ", " + semLeg + " foto(s) sem legenda (primeira do dia)" : "") + ". Fotos ainda não enviadas ficam de fora."),
@@ -1016,11 +1064,11 @@
     var partes = [S.msg ? h("div", { class: "aviso" }, S.msg) : null, R.aviso ? h("div", { class: "aviso" }, R.aviso) : null,
       h("div", { class: "linha" }, h("button", { class: "bt sec pe", onclick: function () { S.rel = null; render(); } }, "‹ Voltar"),
         h("span", { class: "tag " + (R.status === "aprovado" ? "env" : "pen") }, R.status === "aprovado" ? "Aprovado" : "Rascunho")),
-      cartaoTipo, cartaoDados, bGerar];
+      cartaoTipo, cartaoDados, (modelo && modelo.layout === "obra") ? cartaoChuva(R) : null, bGerar];
     var custo = custoUS(R.uso_ia);
     if (custo > 0) partes.push(h("p", { class: "mut" }, "Uso de IA neste relatório: cerca de US$ " + custo.toFixed(3) + " (estimativa pelos tokens usados)."));
     if (temTexto) {
-      partes.push(h("div", { class: "cartao" }, h("h2", {}, "Resumos das páginas (item 2)"),
+      if (!(modelo && modelo.layout === "obra")) partes.push(h("div", { class: "cartao" }, h("h2", {}, "Resumos das páginas (item 2)"),
         pags.map(function (p) {
           var txt = R.conteudo.resumos[p.chave] || "", cont = h("div", { class: "cont" + (txt.length > LIMITE_LEGENDA ? " ex" : "") }, txt.length + "/" + LIMITE_LEGENDA);
           var ta = h("textarea", { rows: 3, value: txt, oninput: function (e) { R.conteudo.resumos[p.chave] = e.target.value; cont.textContent = e.target.value.length + "/" + LIMITE_LEGENDA; cont.className = "cont" + (e.target.value.length > LIMITE_LEGENDA ? " ex" : ""); } });
@@ -1035,7 +1083,7 @@
           h("input", { type: "text", value: s.titulo || "", "aria-label": "Título do subitem", oninput: function (e) { s.titulo = e.target.value; } }),
           h("textarea", { rows: 6, value: s.texto || "", oninput: function (e) { s.texto = e.target.value; } })));
       });
-      if (R.usar_item4 && !(modelo && modelo.id === "fiscalizacao")) {
+      if (R.usar_item4 && !(modelo && (modelo.id === "fiscalizacao" || modelo.layout === "obra"))) {
         c3.push(h("h2", { style: "margin-top:16px" }, "Item 4: " + (modelo ? modelo.rotulo_item4 : "Proposta de correção")));
         var ditas = {};
         gruposDoPeriodo(modelo, R.de, R.ate).forEach(function (g) { ditas[g.chave] = g.itens.filter(function (x) { return (x.orientacao || "").trim(); }).length; });
@@ -1053,7 +1101,7 @@
           h("button", { class: "bt sec", disabled: !S.online, onclick: function () { salvarRel(false); } }, "Salvar rascunho"),
           h("button", { class: "bt", disabled: !S.online, onclick: function () { salvarRel(true); } }, "Aprovar")),
         h("button", { class: "bt sec", style: "margin-top:8px", disabled: !!S.exportando || !S.online,
-          onclick: function () { exportar(R.de, R.ate, { status: R.status, modelo_id: R.modelo_id, tema: R.tema, periodo_ini: R.de, periodo_fim: R.ate, usar_item4: !!R.usar_item4 && R.modelo_id !== "fiscalizacao", conteudo: R.conteudo }); } },
+          onclick: function () { exportar(R.de, R.ate, { status: R.status, modelo_id: R.modelo_id, tema: R.tema, periodo_ini: R.de, periodo_fim: R.ate, usar_item4: !!R.usar_item4 && R.modelo_id !== "fiscalizacao" && !ehObraModelo(R.modelo_id), conteudo: R.conteudo }); } },
           S.exportando || "Baixar pacote com este relatório (.zip)"),
         h("p", { class: "mut" }, "O pacote leva as fotos, as legendas, os textos desta tela e o cadastro da obra, para gerar o .docx.")));
     }
@@ -1073,7 +1121,15 @@
     ["objetivo", "Objetivo da vistoria (item 1 do relatório)", "textarea"], ["legenda_mapa", "Legenda do mapa (Figura 1)", "text"],
     ["texto_item3", "Texto de abertura do item 3 ({nome_no_texto} é substituído)", "textarea"]
   ];
-  var TIPOS = [{ id: "consultoria", rot: "Consultoria Técnica" }, { id: "fiscalizacao", rot: "Fiscalização de obra" }, { id: "outros", rot: "Outros tipos" }];
+  var DEF_FICHA = [
+    ["f_proprietario", "Proprietário(a)", "text"], ["f_resp_projeto", "Responsável pelo projeto arquitetônico (nome e CREA)", "text"],
+    ["f_resp_execucao", "Responsável pela execução (empresa, nome e CREA)", "text"], ["f_localizacao", "Localização detalhada do item 1 (loteamento, bairro, lote e quadra)", "textarea"],
+    ["f_lat", "Latitude da obra (ex.: -24.9555), para buscar a chuva", "text"], ["f_lon", "Longitude da obra (ex.: -53.4552)", "text"],
+    ["f_legenda_fig1", "Legenda da Figura 1", "text"], ["f_legenda_fig2", "Legenda da Figura 2", "text"],
+    ["f_empresa", "Empresa que emite o relatório (ex.: E5 Engenharia)", "text"], ["f_assinante_nome", "Assinante (nome)", "text"],
+    ["f_assinante_cargo", "Assinante (cargo)", "text"], ["f_assinante_crea", "Assinante (CREA)", "text"]
+  ];
+  var TIPOS = [{ id: "consultoria", rot: "Consultoria Técnica" }, { id: "fiscalizacao", rot: "Fiscalização de obra" }, { id: "outros", rot: "Outros tipos" }, { id: "obra", rot: "Relatório de obra" }];
   function tipoDe(o) { return (o && o.tipo_vistoria) || "fiscalizacao"; }
   function defObra() {
     if (!S.temTipo) return DEF_OBRA;
@@ -1130,7 +1186,7 @@
 
   function telaCliente() {
     var novo = S.clienteSel === "novo", c = novo ? {} : (S.clientes.find(function (x) { return x.id === S.clienteSel; }) || {});
-    var form = montarForm(DEF_CLIENTE, c), logo = h("input", { type: "file", accept: "image/png,image/jpeg" });
+    var form = montarForm(DEF_CLIENTE, c), logo = h("input", { type: "file", accept: "image/png,image/jpeg", "data-arq": "c_logo" });
     async function salvar() {
       if (exigeOnline()) return;
       var reg = form.ler();
@@ -1145,7 +1201,7 @@
           if (u.error) throw u.error;
         }
         if (!novo) await S.sb.from("obras").update({ cliente: reg.razao_social.toUpperCase() }).eq("cliente_id", id);
-        S.clienteSel = id; S.msg = "Cliente salvo.";
+        S.clienteSel = id; S.msg = "Cliente salvo."; guardado("rasc_form", ""); S.rascPend = null;
         await carregarNuvem(); await carregarLogos();
       } catch (e) { S.msg = "Erro ao salvar: " + msgErro(e); }
       render();
@@ -1172,8 +1228,20 @@
     var novo = S.obraSel === "nova", cli = S.clientes.find(function (x) { return x.id === S.clienteSel; }) || {};
     var o = novo ? { titulo_relatorio: "RELATÓRIO DE FISCALIZAÇÃO DE OBRA", legenda_mapa: "Figura 1: Localização da edificação objeto da vistoria.", cidade_assinatura: "", ativa: true,
       texto_item3: "O presente relatório tem por objetivo acompanhar e documentar, por meio de inspeção visual e registro fotográfico, os serviços em execução no {nome_no_texto}, ", objetivo: "Fiscalização da obra." } : (S.obras.find(function (x) { return x.id === S.obraSel; }) || {});
-    var form = montarForm(defObra(), o), capa = h("input", { type: "file", accept: "image/jpeg,image/png" }), mapa = h("input", { type: "file", accept: "image/jpeg,image/png" });
+    var copiadaDe = null;
+    if (novo) {      // nova obra de um cliente que já tem obra de relatório de obra: herda empresa, logo, assinante e cidade
+      var irmas = S.obras.filter(function (x) { return x.cliente_id === cli.id && x.tipo_vistoria === "obra" && x.ficha && Object.keys(x.ficha).length; });
+      var src = irmas.length ? irmas[irmas.length - 1] : null;
+      if (src) {
+        copiadaDe = src.nome_exibicao; o.tipo_vistoria = "obra"; o.cidade_assinatura = src.cidade_assinatura || o.cidade_assinatura; o.titulo_relatorio = src.titulo_relatorio || o.titulo_relatorio;
+        o.ficha = {}; ["empresa", "assinante_nome", "assinante_cargo", "assinante_crea", "logo_path", "cores", "cidade_assinatura"].forEach(function (k) { if (src.ficha[k]) o.ficha[k] = src.ficha[k]; });
+      }
+    }
+    var form = montarForm(defObra(), o), capa = h("input", { type: "file", accept: "image/jpeg,image/png", "data-arq": "o_capa" }), mapa = h("input", { type: "file", accept: "image/jpeg,image/png", "data-arq": "o_mapa" });
     var ativa = h("input", { type: "checkbox", "data-f": "ativa" }); ativa.checked = o.ativa !== false;
+    var fi = o.ficha || {}, fvals = {}; Object.keys(fi).forEach(function (k) { fvals["f_" + k] = fi[k]; });
+    var formFicha = S.temFicha ? montarForm(DEF_FICHA, fvals) : null;
+    var fLogo = h("input", { type: "file", accept: "image/png,image/jpeg", "data-arq": "o_logo" }), fFig1 = h("input", { type: "file", accept: "image/jpeg,image/png", "data-arq": "o_fig1" }), fFig2 = h("input", { type: "file", accept: "image/jpeg,image/png", "data-arq": "o_fig2" });
     async function salvar() {
       if (exigeOnline()) return;
       var reg = form.ler();
@@ -1188,9 +1256,17 @@
         reg.id = id;
         if (capa.files[0]) reg.imagem_capa = await enviarArquivo(capa.files[0], "obras/" + id + "/capa" + extDe(capa.files[0]));
         if (mapa.files[0]) reg.imagem_mapa = await enviarArquivo(mapa.files[0], "obras/" + id + "/mapa" + extDe(mapa.files[0]));
+        if (formFicha) {
+          var fn = Object.assign({}, fi), lido = formFicha.ler();
+          Object.keys(lido).forEach(function (k) { fn[k.slice(2)] = lido[k]; });
+          if (fLogo.files[0]) fn.logo_path = await enviarArquivo(fLogo.files[0], "obras/" + id + "/logo" + extDe(fLogo.files[0]));
+          if (fFig1.files[0]) fn.fig1_path = await enviarArquivo(fFig1.files[0], "obras/" + id + "/fig1" + extDe(fFig1.files[0]));
+          if (fFig2.files[0]) fn.fig2_path = await enviarArquivo(fFig2.files[0], "obras/" + id + "/fig2" + extDe(fFig2.files[0]));
+          reg.ficha = fn;
+        }
         var r = novo ? await S.sb.from("obras").insert(reg) : await S.sb.from("obras").update(reg).eq("id", id);
         if (r.error) throw r.error;
-        S.obraSel = id; S.obraId = id; guardado("obra", id); S.msg = "Obra salva.";
+        S.obraSel = id; S.obraId = id; guardado("obra", id); S.msg = "Obra salva."; guardado("rasc_form", ""); S.rascPend = null;
         await carregarNuvem();
       } catch (e) { S.msg = "Erro ao salvar: " + msgErro(e); }
       render();
@@ -1200,10 +1276,16 @@
       h("button", { class: "bt sec pe", onclick: function () { S.obraSel = null; S.msg = ""; render(); } }, "‹ Voltar ao cliente"),
       h("div", { class: "cartao" },
         h("h2", {}, (novo ? "Nova obra" : "Obra") + " | " + (cli.razao_social || "")),
+        copiadaDe ? h("p", { class: "mut" }, "Empresa, assinante, logo e cidade foram copiados de " + copiadaDe + ". Preencha só o que é desta obra.") : null,
         form.blocos,
         h("div", { class: "campo" }, h("label", { class: "chk" }, ativa, "Obra ativa (aparece no app de campo e no painel)")),
         h("div", { class: "campo" }, h("label", {}, "Imagem de capa do relatório (opcional; atual: " + (o.imagem_capa ? "enviada" : "padrão") + ")"), capa),
         h("div", { class: "campo" }, h("label", {}, "Mapa de localização, Figura 1 (atual: " + (o.imagem_mapa ? "enviado" : "nenhum") + ")"), mapa),
+        formFicha ? h("div", { class: "prop" },
+          h("h2", {}, "Dados do relatório de obra (só para o tipo Relatório de obra)"), formFicha.blocos,
+          h("div", { class: "campo" }, h("label", {}, "Logo da empresa, PNG (atual: " + (fi.logo_path ? "enviado" : "nenhum") + ")"), fLogo),
+          h("div", { class: "campo" }, h("label", {}, "Figura 1 do item 1, ex.: GeoPortal (atual: " + (fi.fig1_path ? "enviada" : "nenhuma") + ")"), fFig1),
+          h("div", { class: "campo" }, h("label", {}, "Figura 2 do item 1, vista aérea (atual: " + (fi.fig2_path ? "enviada" : "nenhuma") + ")"), fFig2)) : null,
         h("button", { class: "bt", onclick: salvar }, "Salvar obra")));
   }
 
@@ -1272,12 +1354,15 @@
     if (a && /^(TEXTAREA|INPUT|SELECT)$/.test(a.tagName) && app.contains(a) && a.type !== "checkbox" && a.type !== "file") { pendRender = true; return; }
     pendRender = false;
     var y = window.scrollY, tela, sig = S.aba + "|" + S.clienteSel + "|" + S.obraSel, rasc = null;
-    if (sig === S.sigAnt) {                       // mesma tela: não perde o que foi digitado
-      rasc = {};
+    var arqs = null;
+    if (sig === S.sigAnt) {                       // mesma tela: não perde o que foi digitado nem o arquivo escolhido
+      rasc = {}; arqs = {};
       app.querySelectorAll("[data-f]").forEach(function (e) { rasc[e.getAttribute("data-f")] = e.type === "checkbox" ? e.checked : e.value; });
-    }
+      app.querySelectorAll("input[type=file][data-arq]").forEach(function (e) { if (e.files && e.files[0]) arqs[e.getAttribute("data-arq")] = e.files[0]; });
+    } else if (S.rascPend && S.rascPend.sig === sig) { rasc = S.rascPend.valores; }   // reabriu o app: devolve o rascunho do formulário
     S.sigAnt = sig;
     if (S.precisaLogin || !S.user) { app.replaceChildren(telaLogin()); return; }
+    if (S.aba !== "clientes" || (!S.clienteSel && !S.obraSel)) { S.rascPend = null; guardado("rasc_form", ""); }
     var id = S.aba;
     if (id === "inicio") tela = telaInicio();
     else if (id === "painel" && temModulo("vistoria")) tela = telaPainel();
@@ -1291,6 +1376,14 @@
     app.replaceChildren(h("div", { class: "shell" }, lateral(),
       h("div", { class: "vel" + (S.menuAberto ? " on" : ""), onclick: function () { S.menuAberto = false; render(); } }),
       h("div", { class: "conteudo" }, cabecalho(), tela, navegacao())));
+    if (rasc) app.querySelectorAll("[data-f]").forEach(function (e) {
+      var k = e.getAttribute("data-f"); if (!(k in rasc)) return;
+      if (e.type === "checkbox") e.checked = !!rasc[k]; else e.value = rasc[k];
+    });
+    if (arqs) app.querySelectorAll("input[type=file][data-arq]").forEach(function (e) {
+      var f = arqs[e.getAttribute("data-arq")]; if (!f) return;
+      try { var dt = new DataTransfer(); dt.items.add(f); e.files = dt.files; } catch (x) { /* navegador sem suporte: escolher de novo */ }
+    });
     window.scrollTo(0, y);
     if (S.novoId && id === "regs") {
       var alvo = document.getElementById("reg-" + S.novoId);
@@ -1302,12 +1395,27 @@
     }
   }
     document.addEventListener("focusout", function () { setTimeout(function () { if (pendRender) render(); }, 150); });
+  function guardarRascunhoForm() {
+    if (S.aba !== "clientes" || (!S.clienteSel && !S.obraSel)) return;
+    var v = {};
+    app.querySelectorAll("[data-f]").forEach(function (e) { v[e.getAttribute("data-f")] = e.type === "checkbox" ? e.checked : e.value; });
+    guardado("rasc_form", JSON.stringify({ sig: S.aba + "|" + S.clienteSel + "|" + S.obraSel, aba: S.aba, clienteSel: S.clienteSel, obraSel: S.obraSel, valores: v, ts: Date.now() }));
+  }
+  document.addEventListener("input", guardarRascunhoForm);
+  document.addEventListener("change", guardarRascunhoForm);
 
   // ---------------------------------------------------------------- início
   async function iniciar() {
     await carregarLocal();
     var hsh = (location.hash || "").replace("#/", "");
     if (hsh && tituloDe(hsh)) S.aba = hsh;
+    try {
+      var rf = JSON.parse(guardado("rasc_form") || "null");
+      if (rf && rf.aba === "clientes" && Date.now() - rf.ts < 12 * 3600 * 1000 && (rf.clienteSel || rf.obraSel)) {
+        S.aba = "clientes"; S.clienteSel = rf.clienteSel; S.obraSel = rf.obraSel; S.rascPend = rf;
+        S.msg = "Recuperamos o que você tinha digitado. Confira, escolha de novo as imagens e salve.";
+      }
+    } catch (e) { /* sem rascunho */ }
     render();
     if (S.online) { await carregarNuvem(); sincronizar(); assinar(); }
   }

@@ -116,3 +116,5 @@ header .tit{flex:1}
 .obra-sel .ob-txt strong{font-size:16px}
 .obra-sel .seta{font-size:26px;color:var(--cinza);line-height:1}
 .cartao.reg.novo{outline:3px solid var(--acc);outline-offset:-1px}
+/* campos de data no iPhone: não passam da largura da tela */
+.campo input[type=date]{display:block;width:100%;max-width:100%;min-width:0;box-sizing:border-box;min-height:40px;-webkit-appearance:none;appearance:none}
