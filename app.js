@@ -14,7 +14,7 @@
     minis: new Map(), aba: "inicio", online: navigator.onLine, sincronizando: false, precisaLogin: false,
     mes: new Date(), diaSel: null, msg: "", obraEdit: null, exportando: "", confirmar: null, carregou: false,
     modelos: [], relatorios: [], semScript04: false, rel: null,
-    passo: "tipos", tipoSel: null, temTipo: false, novoId: null
+    passo: "tipos", tipoSel: null, temTipo: false, novoId: null, detAberto: {}
   };
   var idb = null, pendRender = false, timerRefresh = null;
   var app = document.getElementById("app");
@@ -282,8 +282,13 @@
         if (ref) { ref.estado = "enviando"; render(); }
         try {
           await enviarItem(it);
+          var atual = S.fila.find(function (x) { return x.id === it.id; }), dif = {};
+          if (atual) ["local", "legenda", "sistema", "diagnostico", "orientacao", "entra", "dia", "ts", "semana"].forEach(function (c) {
+            if (atual[c] !== undefined && atual[c] !== it[c]) dif[c] = atual[c];     // digitado enquanto a foto estava subindo
+          });
+          S.fila = S.fila.filter(function (x) { return x.id !== it.id; });      // sem pausa entre a comparação e a retirada da fila
+          if (Object.keys(dif).length) await guardarEdicao(it.id, dif);
           await dbDel("fila", it.id);
-          S.fila = S.fila.filter(function (x) { return x.id !== it.id; });
         } catch (e) {
           it.estado = "falha"; it.erro = msgErro(e); await dbPut("fila", it);
           if (ref) { ref.estado = "falha"; ref.erro = it.erro; }
@@ -291,8 +296,8 @@
       }
       var eds = await dbTodos("edicoes");
       for (var j = 0; j < eds.length; j++) {
-        var r = await gravarCampos(eds[j].id, eds[j].campos);
-        if (!r.error) { await dbDel("edicoes", eds[j].id); delete S.edicoes[eds[j].id]; }
+        var enviado = S.edicoes[eds[j].id], r = await gravarCampos(eds[j].id, eds[j].campos);
+        if (!r.error && S.edicoes[eds[j].id] === enviado && JSON.stringify(enviado.campos) === JSON.stringify(eds[j].campos)) { await dbDel("edicoes", eds[j].id); delete S.edicoes[eds[j].id]; }
       }
       S.msg = "";
     } finally { S.sincronizando = false; }
@@ -333,23 +338,34 @@
     render();
     sincronizar();
   }
+  var timersPush = {};
+  function agendarPush(id) {          // envia a edição ao Supabase sem pressa; se falhar, a edição continua guardada no aparelho
+    clearTimeout(timersPush[id]);
+    timersPush[id] = setTimeout(async function () {
+      var ed = S.edicoes[id];
+      if (!ed || !S.online || !S.sb || S.fila.some(function (x) { return x.id === id; })) return;
+      try {
+        var u = await gravarCampos(id, ed.campos);
+        if (!u.error && S.edicoes[id] === ed) { await dbDel("edicoes", id); delete S.edicoes[id]; }
+      } catch (e) { /* tenta de novo na próxima sincronização */ }
+    }, 1500);
+  }
+  async function guardarEdicao(id, campos) {
+    var ed = S.edicoes[id] || { id: id, campos: {} };
+    Object.assign(ed.campos, campos); S.edicoes[id] = ed;
+    await dbPut("edicoes", ed);
+  }
   async function editarCampo(it, campo, valor) {
     var campos = typeof campo === "object" ? campo : (function () { var o = {}; o[campo] = valor; return o; })();
-    if (it._pend) {
-      var p = S.fila.find(function (x) { return x.id === it.id; });
-      if (!p) return;
+    var p = S.fila.find(function (x) { return x.id === it.id; });
+    if (p) {                                     // foto ainda na fila de envio: grava na própria fila
       Object.assign(p, campos); await dbPut("fila", p);
-    } else {
-      var r = S.regs.find(function (x) { return x.id === it.id; });
-      var ed = S.edicoes[it.id] || { id: it.id, campos: {} };
-      Object.assign(ed.campos, campos); S.edicoes[it.id] = ed;
-      await dbPut("edicoes", ed);
-      if (r) Object.assign(r, campos);
-      if (S.online && S.sb) {
-        var u = await gravarCampos(it.id, ed.campos);
-        if (!u.error) { await dbDel("edicoes", it.id); delete S.edicoes[it.id]; }
-      }
+      return;
     }
+    var r = S.regs.find(function (x) { return x.id === it.id; });   // foto já enviada (ou enviada enquanto você digitava)
+    if (r) Object.assign(r, campos);
+    await guardarEdicao(it.id, campos);
+    agendarPush(it.id);
   }
   async function moverParaDia(itens, novoDia) {
     if (!novoDia) { S.msg = "Escolha o novo dia antes de mover."; render(); return; }
@@ -524,13 +540,13 @@
     function area(campo, rotulo) {
       var t = h("textarea", {
         rows: 2, maxlength: 1500, placeholder: rotulo, value: it[campo] || "", "aria-label": rotulo,
-        oninput: function (e) { clearTimeout(t._t); t._t = setTimeout(function () { editarCampo(it, campo, e.target.value); }, 600); },
-        onblur: function (e) { clearTimeout(t._t); editarCampo(it, campo, e.target.value); }
+        oninput: function (e) { editarCampo(it, campo, e.target.value); },
+        onblur: function (e) { editarCampo(it, campo, e.target.value); }
       });
       return t;
     }
     var preenchido = !!(it.diagnostico || it.orientacao);
-    return h("details", { class: "tec", open: preenchido ? "" : null },
+    return h("details", { class: "tec", open: (preenchido || S.detAberto[it.id]) ? "" : null, ontoggle: function (e) { S.detAberto[it.id] = e.target.open; } },
       h("summary", {}, "Diagnóstico e orientação (opcional)" + (preenchido ? " ✓" : "")),
       area("diagnostico", "Diagnóstico (o que você constatou e a causa provável, ditado)"),
       area("orientacao", "Orientação (o que foi orientado ou recomendado, ditado)"));
@@ -544,9 +560,9 @@
       placeholder: "Legenda (toque no microfone do teclado para ditar)", maxlength: 400, value: it.legenda || "",
       oninput: function (e) {
         var n = e.target.value.length; cont.textContent = n + "/" + LIMITE_LEGENDA; cont.className = "cont" + (n > LIMITE_LEGENDA ? " ex" : "");
-        clearTimeout(ta._t); ta._t = setTimeout(function () { editarCampo(it, "legenda", e.target.value); }, 500);
+        editarCampo(it, "legenda", e.target.value);
       },
-      onblur: function (e) { clearTimeout(ta._t); editarCampo(it, "legenda", e.target.value); }
+      onblur: function (e) { editarCampo(it, "legenda", e.target.value); }
     });
     var chave = "rm" + it.id;
     return h("div", { class: "cartao reg", id: "reg-" + it.id },
@@ -555,10 +571,12 @@
         h("div", { class: "meta" }, hora(it.ts), tag, it.estado === "falha" && it.erro ? h("span", { class: "erro" }, it.erro) : null),
         h("input", {
           type: "text", placeholder: "Local (ex.: torre B, 3º pavimento)", value: it.local || "", "aria-label": "Local",
+          oninput: function (e) { editarCampo(it, "local", e.target.value); },
           onchange: function (e) { editarCampo(it, "local", e.target.value); }
         }),
         h("input", {
           type: "text", list: "lista-sistemas", placeholder: "Sistema ou ambiente (ex.: Impermeabilização)", value: it.sistema || "", "aria-label": "Sistema ou ambiente",
+          oninput: function (e) { editarCampo(it, "sistema", e.target.value); },
           onchange: function (e) { editarCampo(it, "sistema", e.target.value.trim()); }
         }),
         ta, cont,
@@ -1406,6 +1424,7 @@
 
   // ---------------------------------------------------------------- início
   async function iniciar() {
+    try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e0) { /* sem suporte */ }   // pede ao navegador para não apagar fotos e textos guardados no aparelho
     await carregarLocal();
     var hsh = (location.hash || "").replace("#/", "");
     if (hsh && tituloDe(hsh)) S.aba = hsh;
