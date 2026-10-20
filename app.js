@@ -480,6 +480,7 @@
   var MENU = [
     { sec: "PRINCIPAL", itens: [{ id: "inicio", rot: "Início" }] },
     { sec: "VISTORIA", mod: "vistoria", itens: [{ id: "regs", rot: "Registros de campo" }, { id: "painel", rot: "Painel de vistorias" }, { id: "relatorios", rot: "Relatórios" }, { id: "clientes", rot: "Clientes e obras" }] },
+    { sec: "E5 ENGENHARIA", mod: "vistoria", itens: [{ id: "e5", rot: "Obras E5" }] },
     { sec: "MANUAL", mod: "manual", itens: [{ id: "manual", rot: "Manual de uso", breve: 1 }, { id: "plano", rot: "Plano de manutenção", breve: 1 }, { id: "memorial", rot: "Memorial de acabamentos", breve: 1 }, { id: "asbuilt", rot: "As built", breve: 1 }] },
     { sec: "LAUDO", mod: "laudo", itens: [{ id: "laudo", rot: "Laudos", breve: 1 }] },
     { sec: "SISTEMA", itens: [{ id: "usuarios", rot: "Usuários", admin: 1 }, { id: "conta", rot: "Conta" }] }
@@ -500,6 +501,13 @@
     try { history.replaceState(null, "", "#/" + id); } catch (e) { /* ignora */ }
     render(); window.scrollTo(0, 0);
   }
+  function garantirContexto(e5) {   // obra do contexto certo: E5 de um lado, demais vistorias do outro
+    var cur = obraAtual();
+    if (cur && (tipoDe(cur) === "obra") !== e5) {
+      var alt = S.obras.find(function (o) { return o.ativa !== false && (tipoDe(o) === "obra") === e5; });
+      S.obraId = alt ? alt.id : null; guardado("obra", S.obraId || ""); S.rel = null;
+    }
+  }
   function lateral() {
     var blocos = [];
     MENU.forEach(function (sec) {
@@ -508,7 +516,7 @@
       if (!itens.length) return;
       blocos.push(h("div", { class: "sec" }, sec.sec));
       itens.forEach(function (i) {
-        blocos.push(h("button", { class: "item" + (S.aba === i.id ? " at" : ""), onclick: function () { if (i.id === "regs") { S.passo = "tipos"; guardado("passo", "tipos"); } irPara(i.id); } }, i.rot, i.breve ? h("span", { class: "breve" }, "em breve") : null));
+        blocos.push(h("button", { class: "item" + (S.aba === i.id ? " at" : ""), onclick: function () { if (i.id !== "e5") garantirContexto(false); if (i.id === "regs") { S.passo = "tipos"; guardado("passo", "tipos"); } irPara(i.id); } }, i.rot, i.breve ? h("span", { class: "breve" }, "em breve") : null));
       });
     });
     return h("aside", { class: "lateral" + (S.menuAberto ? " aberta" : "") },
@@ -523,14 +531,14 @@
       h("strong", { class: "tit" + (comObra ? " curto" : "") }, S.aba === "regs" ? "Vistoria" : tituloDe(S.aba)),
       comObra ? h("select", {
         "aria-label": "Obra", onchange: function (e) { S.obraId = e.target.value; guardado("obra", S.obraId); S.rel = null; render(); }
-      }, S.obras.filter(function (o) { return o.ativa !== false || o.id === S.obraId; }).map(function (o) { return h("option", { value: o.id, selected: o.id === S.obraId ? "" : null }, o.nome_exibicao); })) : h("span", { class: "esp" }),
+      }, S.obras.filter(function (o) { var cur = obraAtual(), e5 = !!(cur && tipoDe(cur) === "obra"); return (o.ativa !== false || o.id === S.obraId) && (S.aba === "relatorios" ? (!cur || tipoDe(o) === tipoDe(cur)) : ((tipoDe(o) === "obra") === e5)); }).map(function (o) { return h("option", { value: o.id, selected: o.id === S.obraId ? "" : null }, o.nome_exibicao); })) : h("span", { class: "esp" }),
       h("span", { class: "pill " + (S.online ? "on" : "off") }, (S.online ? "Online" : "Offline") + (pend ? " · " + pend + " a enviar" : "")));
   }
   function navegacao() {
     var abas = [];
     if (temModulo("vistoria")) abas.push(["regs", "Vistoria"], ["painel", "Painel"]); else abas.push(["inicio", "Início"]);
     var nav = h("nav", {}, abas.map(function (a) {
-      return h("button", { class: S.aba === a[0] ? "at" : "", onclick: function () { irPara(a[0]); } }, a[1]);
+      return h("button", { class: S.aba === a[0] ? "at" : "", onclick: function () { if (S.aba === "e5" || a[0] !== "inicio") garantirContexto(false); irPara(a[0]); } }, a[1]);
     }));
     nav.append(h("button", { class: S.menuAberto ? "at" : "", onclick: function () { S.menuAberto = !S.menuAberto; render(); } }, "Menu"));
     return nav;
@@ -621,7 +629,7 @@
       S.msg ? h("div", { class: "aviso" }, S.msg) : null,
       h("h2", {}, "Vistoria"),
       h("p", { class: "mut" }, "Escolha o tipo de serviço."),
-      TIPOS.map(function (t) {
+      TIPOS.filter(function (t) { return t.id !== "obra"; }).map(function (t) {
         var n = ativas.filter(function (o) { return tipoDe(o) === t.id; }).length;
         return h("div", { class: "cartao obra-sel", onclick: function () { S.tipoSel = t.id; guardado("tipoSel", t.id); irParaPasso("obras"); } },
           h("div", { class: "ob-txt" }, h("strong", {}, t.rot), h("div", { class: "mut" }, n + (n === 1 ? " obra ativa" : " obras ativas"))),
@@ -782,7 +790,7 @@
   function novoRel() {
     var itens = itensDaObra().filter(function (i) { return !i._pend; }), ult = itens.length ? itens[itens.length - 1] : null;
     var seg = ult ? ult.semana : diaDe(segundaDe(diaDe(new Date())));
-    var ob = obraAtual(), padrao = (ob && ob.tipo_vistoria === "obra" && modeloDe("obra-e5")) ? "obra-e5" : (modeloDe("fiscalizacao") ? "fiscalizacao" : (S.modelos[0] ? S.modelos[0].id : null));
+    var ob = obraAtual(), tp = tipoDe(ob), padrao = (tp === "obra" && modeloDe("obra-e5")) ? "obra-e5" : (tp === "consultoria" && modeloDe("consultoria")) ? "consultoria" : (modeloDe("fiscalizacao") ? "fiscalizacao" : (S.modelos[0] ? S.modelos[0].id : null));
     return { id: null, modelo_id: padrao, outros: false,
       de: seg, ate: diaDe(sexta(seg)), tema: "", descricao: "", usar_item4: false, status: "rascunho",
       conteudo: { resumos: {}, secoes: [], pendencias: [] }, uso_ia: {}, ocupado: "", prop: null, aviso: "" };
@@ -1006,6 +1014,26 @@
     el.addEventListener(o.tipo === "select" ? "change" : "input", function (e) { obj[chave] = e.target.value; if (o.aoMudar) o.aoMudar(); });
     return h("div", { class: "campo" }, h("label", {}, rotulo), el);
   }
+  function nomeCliente(o) { var c = S.clientes.find(function (x) { return x.id === o.cliente_id; }); return (c && c.razao_social) || o.cliente || "Sem cliente"; }
+  function cartaoObraRel() {   // escolha explícita: tipo, cliente e obra, antes de criar ou abrir relatórios
+    var cur = obraAtual(), tipoAt = tipoDe(cur), ativas = S.obras.filter(function (o) { return o.ativa !== false || o.id === S.obraId; });
+    var doTipo = ativas.filter(function (o) { return tipoDe(o) === tipoAt; });
+    var clientes = []; doTipo.forEach(function (o) { var n = nomeCliente(o); if (clientes.indexOf(n) < 0) clientes.push(n); });
+    clientes.sort(function (a, b) { return a.localeCompare(b); });
+    var cliAt = cur ? nomeCliente(cur) : "", obrasCli = doTipo.filter(function (o) { return nomeCliente(o) === cliAt; });
+    function escolher(o) { S.obraId = o ? o.id : null; guardado("obra", S.obraId || ""); S.rel = null; render(); }
+    function sel(rot, valor, opcoes, aoMudar) {
+      var el = h("select", { onchange: function (e) { aoMudar(e.target.value); } }, opcoes.map(function (op) { return h("option", { value: op[0] }, op[1]); }));
+      el.value = valor; return h("div", { class: "campo" }, h("label", {}, rot), el);
+    }
+    return h("div", { class: "cartao" }, h("h2", {}, "Para qual obra é o relatório?"),
+      sel("Tipo de vistoria", tipoAt, TIPOS.map(function (t) { return [t.id, t.rot]; }), function (t) {
+        escolher(ativas.find(function (o) { return tipoDe(o) === t; }) || null);
+        if (!S.obraId) { S.msg = "Nenhuma obra ativa neste tipo."; render(); }
+      }),
+      sel("Cliente", cliAt, clientes.map(function (n) { return [n, n]; }), function (n) { escolher(doTipo.find(function (o) { return nomeCliente(o) === n; })); }),
+      sel("Obra", S.obraId || "", obrasCli.map(function (o) { return [o.id, o.nome_exibicao]; }), function (id) { escolher(S.obras.find(function (o) { return o.id === id; })); }));
+  }
   function telaRelatorios() {
     var obra = obraAtual(), R = S.rel;
     if (!obra) return h("main", {}, h("p", { class: "mut" }, "Cadastre uma obra em Clientes e obras."));
@@ -1017,7 +1045,8 @@
       var lista = S.relatorios.filter(function (r) { return r.obra_id === S.obraId; });
       return h("main", {},
         S.msg ? h("div", { class: "aviso" }, S.msg) : null,
-        h("button", { class: "bt", onclick: function () { S.rel = novoRel(); render(); } }, "Novo relatório"),
+        cartaoObraRel(),
+        h("button", { class: "bt", onclick: function () { S.rel = novoRel(); render(); } }, "Novo relatório para " + obra.nome_exibicao),
         lista.length ? lista.map(function (r) {
           var m = modeloDe(r.modelo_id), chave = "dr" + r.id;
           return h("div", { class: "cartao" },
@@ -1038,10 +1067,10 @@
     var ehOutros = R.outros || (modelo && !modelo.sistema && modelo.layout !== "obra");
     var cartaoTipo = h("div", { class: "cartao" }, h("h2", {}, "Tipo de vistoria"),
       h("div", { class: "linha" },
-        botaoTipo("Fiscalização", !ehOutros && R.modelo_id === "fiscalizacao", function () { R.modelo_id = "fiscalizacao"; R.outros = false; render(); }),
-        botaoTipo("Consultoria", !ehOutros && R.modelo_id === "consultoria", function () { R.modelo_id = "consultoria"; R.outros = false; render(); }),
-        modeloDe("obra-e5") ? botaoTipo("Relatório de obra", R.modelo_id === "obra-e5", function () { R.modelo_id = "obra-e5"; R.outros = false; R.usar_item4 = false; render(); }) : null,
-        botaoTipo("Outros tipos", ehOutros && R.modelo_id !== "obra-e5", function () { R.outros = true; R.modelo_id = null; render(); })));
+        tipoDe(obra) === "obra" ? null : botaoTipo("Fiscalização", !ehOutros && R.modelo_id === "fiscalizacao", function () { R.modelo_id = "fiscalizacao"; R.outros = false; render(); }),
+        tipoDe(obra) === "obra" ? null : botaoTipo("Consultoria", !ehOutros && R.modelo_id === "consultoria", function () { R.modelo_id = "consultoria"; R.outros = false; render(); }),
+        (tipoDe(obra) === "obra" && modeloDe("obra-e5")) ? botaoTipo("Relatório de obra (E5)", R.modelo_id === "obra-e5", function () { R.modelo_id = "obra-e5"; R.outros = false; R.usar_item4 = false; render(); }) : null,
+        tipoDe(obra) === "obra" ? null : botaoTipo("Outros tipos", ehOutros && R.modelo_id !== "obra-e5", function () { R.outros = true; R.modelo_id = null; render(); })));
     if (ehOutros) {
       cartaoTipo.append(
         customs.length ? h("div", { class: "campo" }, h("label", {}, "Modelos de outros tipos já salvos"),
@@ -1076,13 +1105,14 @@
       h("p", { class: "mut" }, pags.length + " página(s) de fotos no período" + (repetem ? ", " + repetem + " foto(s) repetem a legenda da anterior" : "") + (semLeg ? ", " + semLeg + " foto(s) sem legenda (primeira do dia)" : "") + ". Fotos ainda não enviadas ficam de fora."),
       (parseDia(R.ate) - parseDia(R.de)) / 86400000 > 45 ? h("div", { class: "aviso" }, "Período maior que 45 dias. Para o relatório mensal, use De e Até dentro do mês desejado.") : null);
     var chaveGer = "ger" + (R.id || "novo"), temTexto = R.conteudo.secoes.length || Object.keys(R.conteudo.resumos).length;
-    var bGerar = h("button", { class: "bt", disabled: !!R.ocupado || !S.online || !modelo, onclick: function () {
-      if (temTexto) confirmar(chaveGer, gerarRascunho); else gerarRascunho(); } },
-      R.ocupado || (S.confirmar === chaveGer ? "Substituir textos atuais?" : (temTexto ? "Gerar rascunho de novo (IA)" : "Gerar rascunho com IA")));
+    var bGerar = h("button", { class: "bt", disabled: !!R.ocupado || !S.online || !modelo, onclick: function () { confirmar(chaveGer, gerarRascunho); } },
+      R.ocupado || (S.confirmar === chaveGer ? "Confirmar: usar IA agora" + (temTexto ? " (substitui os textos)" : "") + "?" : (temTexto ? "Gerar rascunho de novo (IA)" : "Gerar rascunho com IA")));
+    var resumoGer = h("div", { class: "aviso" }, "Este relatório: " + obra.nome_exibicao + " (" + nomeCliente(obra) + ") · " + (modelo ? modelo.nome : "sem modelo") + " · " +
+      dataBR(R.de) + " a " + dataBR(R.ate) + ". Gerar o rascunho consome créditos de IA: confira se é a obra certa.");
     var partes = [S.msg ? h("div", { class: "aviso" }, S.msg) : null, R.aviso ? h("div", { class: "aviso" }, R.aviso) : null,
       h("div", { class: "linha" }, h("button", { class: "bt sec pe", onclick: function () { S.rel = null; render(); } }, "‹ Voltar"),
         h("span", { class: "tag " + (R.status === "aprovado" ? "env" : "pen") }, R.status === "aprovado" ? "Aprovado" : "Rascunho")),
-      cartaoTipo, cartaoDados, (modelo && modelo.layout === "obra") ? cartaoChuva(R) : null, bGerar];
+      cartaoTipo, cartaoDados, (modelo && modelo.layout === "obra") ? cartaoChuva(R) : null, resumoGer, bGerar];
     var custo = custoUS(R.uso_ia);
     if (custo > 0) partes.push(h("p", { class: "mut" }, "Uso de IA neste relatório: cerca de US$ " + custo.toFixed(3) + " (estimativa pelos tokens usados)."));
     if (temTexto) {
@@ -1186,6 +1216,35 @@
     S.msg = "Cadastros precisam de internet. Conecte-se e tente novamente."; render(); return true;
   }
 
+  // ---------------------------------------------------------------- aba E5 (relatório de obra, layout próprio)
+  function clienteE5() {
+    return S.clientes.find(function (c) { return /(^|[^a-z0-9])e5([^a-z0-9]|$)/i.test(c.razao_social || ""); }) || null;
+  }
+  function telaE5() {
+    var obras = S.obras.filter(function (o) { return tipoDe(o) === "obra"; }).sort(function (a, b) { return (a.nome_exibicao || "").localeCompare(b.nome_exibicao || ""); });
+    var ce5 = clienteE5();
+    function ir(o, aba, passo) { S.obraId = o.id; guardado("obra", o.id); S.rel = null; if (passo) { S.passo = passo; guardado("passo", passo); } irPara(aba); }
+    return h("main", {},
+      S.msg ? h("div", { class: "aviso" }, S.msg) : null,
+      h("div", { class: "linha" }, h("h2", {}, "Obras E5 Engenharia"),
+        h("button", { class: "bt pe", style: "flex:0 0 auto", onclick: function () {
+          if (!ce5) { S.msg = "Cadastre primeiro o cliente E5 em Clientes e obras."; render(); return; }
+          S.aba = "clientes"; S.clienteSel = ce5.id; S.obraSel = "nova"; S.msg = ""; render(); window.scrollTo(0, 0);
+        } }, "Nova obra E5")),
+      h("p", { class: "mut" }, "Relatórios de obra no modelo da E5 (capa, chuva do mês, registros por pavimento). Separado das demais vistorias."),
+      obras.length ? obras.map(function (o) {
+        var ult = ultimaVistoria(o.id), pend = S.fila.filter(function (p) { return p.obra_id === o.id; }).length;
+        return h("div", { class: "cartao" },
+          h("strong", {}, o.nome_exibicao),
+          h("div", { class: "mut" }, (ult ? "última vistoria " + dataBR(ult).slice(0, 5) : "sem fotos ainda") + (o.ativa === false ? " · inativa" : "")),
+          pend ? h("span", { class: "tag pen" }, pend + " a enviar") : null,
+          h("div", { class: "linha", style: "margin-top:8px;gap:6px" },
+            h("button", { class: "bt", onclick: function () { ir(o, "regs", "registros"); } }, "Fotografar"),
+            h("button", { class: "bt sec", onclick: function () { ir(o, "relatorios"); } }, "Relatório"),
+            h("button", { class: "bt sec", onclick: function () { S.obraId = o.id; guardado("obra", o.id); S.aba = "clientes"; S.clienteSel = o.cliente_id; S.obraSel = o.id; S.msg = ""; render(); window.scrollTo(0, 0); } }, "Ficha")));
+      }) : h("p", { class: "mut" }, "Nenhuma obra E5 cadastrada. Toque em Nova obra E5."));
+  }
+
   function telaClientes() {
     if (S.obraSel) return telaObra();
     if (S.clienteSel) return telaCliente();
@@ -1254,6 +1313,7 @@
         copiadaDe = src.nome_exibicao; o.tipo_vistoria = "obra"; o.cidade_assinatura = src.cidade_assinatura || o.cidade_assinatura; o.titulo_relatorio = src.titulo_relatorio || o.titulo_relatorio;
         o.ficha = {}; ["empresa", "assinante_nome", "assinante_cargo", "assinante_crea", "logo_path", "cores", "cidade_assinatura"].forEach(function (k) { if (src.ficha[k]) o.ficha[k] = src.ficha[k]; });
       }
+      else if (clienteE5() && clienteE5().id === cli.id) { o.tipo_vistoria = "obra"; o.titulo_relatorio = "RELATÓRIO DE OBRA"; o.cidade_assinatura = "Cascavel"; o.ficha = { empresa: "E5 Engenharia", assinante_nome: "Gerson A. Uhry", assinante_cargo: "Engenheiro Civil", assinante_crea: "CREA-PR 93.985/D" }; }
     }
     var form = montarForm(defObra(), o), capa = h("input", { type: "file", accept: "image/jpeg,image/png", "data-arq": "o_capa" }), mapa = h("input", { type: "file", accept: "image/jpeg,image/png", "data-arq": "o_mapa" });
     var ativa = h("input", { type: "checkbox", "data-f": "ativa" }); ativa.checked = o.ativa !== false;
@@ -1387,6 +1447,7 @@
     else if (id === "regs" && temModulo("vistoria")) tela = telaVistoria();
     else if (id === "relatorios" && temModulo("vistoria")) tela = telaRelatorios();
     else if (id === "clientes" && temModulo("vistoria")) tela = telaClientes();
+    else if (id === "e5" && temModulo("vistoria")) tela = telaE5();
     else if (id === "usuarios" && ehAdmin()) tela = telaUsuarios();
     else if (id === "conta") tela = telaConta();
     else if (MENU.some(function (s) { return s.itens.some(function (i) { return i.id === id && i.breve; }) && temModulo(s.mod); })) tela = telaEmBreve(id);
