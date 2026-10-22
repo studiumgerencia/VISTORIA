@@ -810,15 +810,17 @@
   function itensDoPeriodo(de, ate) {
     var lista = itensDaObra().filter(function (i) { return !i._pend && i.entra !== false && i.dia >= de && i.dia <= ate; })
       .sort(function (a, b) { return new Date(a.ts) - new Date(b.ts); });
-    var ult = null, diaUlt = "";
+    var ult = null, diaUlt = "", ultLocal = "";
     return lista.map(function (i) {
-      if (i.dia !== diaUlt) { ult = null; diaUlt = i.dia; }
+      if (i.dia !== diaUlt) { ult = null; diaUlt = i.dia; ultLocal = ""; }
       var e = Object.assign({}, i, { herdada: false });
       if (!(i.legenda || "").trim() && ult) {
         e.legenda = ult.legenda; e.herdada = true;
         if (!e.sistema) e.sistema = ult.sistema;
         if (!e.local) e.local = ult.local;
       }
+      if (!(e.local || "").trim() && ultLocal) e.local = ultLocal;   // pavimento em branco puxa o da foto anterior do dia, mesmo com legenda própria
+      if ((e.local || "").trim()) ultLocal = e.local;
       if ((e.legenda || "").trim() && !e.herdada) ult = { legenda: e.legenda, sistema: e.sistema || "", local: e.local || "" };
       return e;
     });
@@ -831,16 +833,21 @@
     });
     return pags;
   }
+  // "1º pavimento", "1° Pavimento " e "1o pavimento" são o mesmo local
+  function chaveLocal(v) {
+    return String(v || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+      .replace(/[º°ª]/g, "o").replace(/\s+/g, " ").trim();
+  }
   function gruposDoPeriodo(modelo, de, ate) {
     var itens = itensDoPeriodo(de, ate).filter(function (i) {
       return !i.herdada || (i.diagnostico || "").trim() || (i.orientacao || "").trim();   // fotos que repetem a legenda não duplicam texto
     }), mapa = {}, ordem = [];
     var modo = modelo.agrupar_por || "periodo", tpl = modelo.rotulo_subitem || "{periodo}";
     itens.forEach(function (i) {
-      var chave = modo === "dia" ? i.dia : modo === "sistema" ? (i.sistema || "") : modo === "local" ? (i.local || "") : i.semana;
+      var chave = modo === "dia" ? i.dia : modo === "sistema" ? (i.sistema || "") : modo === "local" ? chaveLocal(i.local) : i.semana;
       if (!mapa[chave]) {
         var t = tpl.replace("{periodo}", modo === "periodo" ? rotuloPeriodoSemana(i.semana) : "")
-          .replace("{data}", dataBR(i.dia)).replace("{sistema}", i.sistema || "Sem sistema ou ambiente indicado").replace("{local}", i.local || "Sem pavimento indicado");
+          .replace("{data}", dataBR(i.dia)).replace("{sistema}", i.sistema || "Sem sistema ou ambiente indicado").replace("{local}", (i.local || "").trim() || "Sem pavimento indicado");
         mapa[chave] = { chave: modo + ":" + chave, titulo: t, itens: [] }; ordem.push(chave);
       }
       mapa[chave].itens.push({ dia: i.dia, sistema: i.sistema || "", local: i.local || "", legenda: i.herdada ? "" : (i.legenda || ""), diagnostico: i.diagnostico || "", orientacao: i.orientacao || "" });
