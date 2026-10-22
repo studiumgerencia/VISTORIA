@@ -430,7 +430,7 @@
     var total = regs.filter(function (r) { return r.entra; }).length, feitas = 0;
     S.exportando = "Preparando..."; render();
     for (var i = 0; i < chaves.length; i++) {
-      var seg = chaves[i], pasta = "2." + (i + 1) + "_" + seg + "_" + diaDe(sexta(seg)), n = 0, lista = semanas[seg];
+      var seg = chaves[i], lista = semanas[seg], ultDia = lista.map(function (r) { return r.dia; }).sort().pop(), pasta = "2." + (i + 1) + "_" + seg + "_" + ultDia, n = 0;
       var comFoto = lista.filter(function (r) { return r.entra; });
       for (var k = 0; k < comFoto.length; k += 40) {
         var lote = comFoto.slice(k, k + 40);
@@ -578,7 +578,7 @@
       h("div", {},
         h("div", { class: "meta" }, hora(it.ts), tag, it.estado === "falha" && it.erro ? h("span", { class: "erro" }, it.erro) : null),
         h("input", {
-          type: "text", placeholder: "Local (ex.: torre B, 3º pavimento)", value: it.local || "", "aria-label": "Local",
+          type: "text", placeholder: "Pavimento ou local (ex.: Térreo, 1º pavimento, torre B)", value: it.local || "", "aria-label": "Local",
           oninput: function (e) { editarCampo(it, "local", e.target.value); },
           onchange: function (e) { editarCampo(it, "local", e.target.value); }
         }),
@@ -785,14 +785,18 @@
   // ---------------------------------------------------------------- relatórios (tipo, IA, aprovação)
   var PRECOS = { "claude-haiku-4-5-20251001": [1, 5], "claude-sonnet-5-5": [2, 10] };   // US$ por milhão de tokens (entrada, saída)
   function modeloDe(id) { return S.modelos.find(function (m) { return m.id === id; }) || null; }
-  function rotuloPeriodoSemana(seg) { var f = sexta(seg); return ddmm(parseDia(seg)) + " a " + ddmm(f) + "/" + f.getFullYear(); }
+  function fimDaSemana(seg) {
+    var ds = itensDaObra().filter(function (i) { return !i._pend && i.semana === seg; }).map(function (i) { return i.dia; }).sort();
+    return ds.length ? parseDia(ds[ds.length - 1]) : sexta(seg);   // o período termina no último dia de visita, não na sexta-feira
+  }
+  function rotuloPeriodoSemana(seg) { var f = fimDaSemana(seg); return ddmm(parseDia(seg)) + " a " + ddmm(f) + "/" + f.getFullYear(); }
   function dataBR(dia) { var d = parseDia(dia); return pad(d.getDate()) + "/" + pad(d.getMonth() + 1) + "/" + d.getFullYear(); }
   function novoRel() {
     var itens = itensDaObra().filter(function (i) { return !i._pend; }), ult = itens.length ? itens[itens.length - 1] : null;
     var seg = ult ? ult.semana : diaDe(segundaDe(diaDe(new Date())));
     var ob = obraAtual(), tp = tipoDe(ob), padrao = (tp === "obra" && modeloDe("obra-e5")) ? "obra-e5" : (tp === "consultoria" && modeloDe("consultoria")) ? "consultoria" : (modeloDe("fiscalizacao") ? "fiscalizacao" : (S.modelos[0] ? S.modelos[0].id : null));
     return { id: null, modelo_id: padrao, outros: false,
-      de: seg, ate: diaDe(sexta(seg)), tema: "", descricao: "", usar_item4: false, status: "rascunho",
+      de: seg, ate: diaDe(fimDaSemana(seg)), tema: "", descricao: "", usar_item4: false, status: "rascunho",
       conteudo: { resumos: {}, secoes: [], pendencias: [] }, uso_ia: {}, ocupado: "", prop: null, aviso: "" };
   }
   function abrirRel(r) {
@@ -833,15 +837,15 @@
     }), mapa = {}, ordem = [];
     var modo = modelo.agrupar_por || "periodo", tpl = modelo.rotulo_subitem || "{periodo}";
     itens.forEach(function (i) {
-      var chave = modo === "dia" ? i.dia : modo === "sistema" ? (i.sistema || "") : i.semana;
+      var chave = modo === "dia" ? i.dia : modo === "sistema" ? (i.sistema || "") : modo === "local" ? (i.local || "") : i.semana;
       if (!mapa[chave]) {
         var t = tpl.replace("{periodo}", modo === "periodo" ? rotuloPeriodoSemana(i.semana) : "")
-          .replace("{data}", dataBR(i.dia)).replace("{sistema}", i.sistema || "Sem sistema ou ambiente indicado");
+          .replace("{data}", dataBR(i.dia)).replace("{sistema}", i.sistema || "Sem sistema ou ambiente indicado").replace("{local}", i.local || "Sem pavimento indicado");
         mapa[chave] = { chave: modo + ":" + chave, titulo: t, itens: [] }; ordem.push(chave);
       }
       mapa[chave].itens.push({ dia: i.dia, sistema: i.sistema || "", local: i.local || "", legenda: i.herdada ? "" : (i.legenda || ""), diagnostico: i.diagnostico || "", orientacao: i.orientacao || "" });
     });
-    if (modo !== "sistema") ordem.sort();
+    if (modo !== "sistema" && modo !== "local") ordem.sort();
     return ordem.map(function (c) { return mapa[c]; });
   }
   async function chamarIA(tarefa, dados) {
@@ -1087,8 +1091,8 @@
             h("p", { class: "mut" }, "Proposta da IA, só de estrutura. Valide e ajuste antes de salvar."),
             ligado("Nome do modelo", P, "nome"), ligado("Título da capa", P, "titulo_capa"), ligado("Tema (subtítulo da capa)", P, "tema"),
             ligado("Nome do item 3", P, "rotulo_item3"),
-            ligado("Subitens do item 3 por", P, "agrupar_por", { tipo: "select", opcoes: [["periodo", "período (semana)"], ["dia", "dia de visita"], ["sistema", "sistema ou ambiente"]] }),
-            ligado("Título dos subitens ({periodo}, {data} ou {sistema})", P, "rotulo_subitem"),
+            ligado("Subitens do item 3 por", P, "agrupar_por", { tipo: "select", opcoes: [["periodo", "período (semana)"], ["dia", "dia de visita"], ["sistema", "sistema ou ambiente"], ["local", "pavimento ou local"]] }),
+            ligado("Título dos subitens ({periodo}, {data}, {sistema} ou {local})", P, "rotulo_subitem"),
             ligado("Incluir item 4, proposta de correção, por padrão", P, "tem_item4", { tipo: "check" }),
             ligado("Frase do encerramento (\"O presente ...\")", P, "tipo_encerramento"),
             ligado("Instruções de estilo para a IA", P, "instrucoes_ia", { tipo: "area", linhas: 4 }),
