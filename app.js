@@ -470,6 +470,7 @@
     S.exportando = "Compactando..."; render();
     var blob = await zip.generateAsync({ type: "blob", compression: "STORE" });
     baixar(blob, "pacote_" + obra.id + "_" + de + "_a_" + ate + ".zip");
+    marcarExportadas(obra.id, regs);
     S.exportando = "";
     S.msg = "Pacote baixado (" + total + " fotos no relatório)." + (pend ? " Atenção: " + pend + " foto(s) ainda pendente(s) de envio ficaram de fora." : "");
     render();
@@ -637,6 +638,47 @@
       }));
   }
 
+  // fotos já incluídas em algum pacote baixado neste aparelho (trava o "apagar todas as fotos da vistoria")
+  function lerExportadas(obraId) {
+    try { return JSON.parse(guardado("exp_" + obraId) || "{}") || {}; } catch (e) { return {}; }
+  }
+  function marcarExportadas(obraId, regs) {
+    var m = lerExportadas(obraId);
+    regs.forEach(function (r) { m[r.id] = 1; });
+    guardado("exp_" + obraId, JSON.stringify(m));
+  }
+  // Só a administradora, dentro da própria obra, com internet. Exige pacote baixado e a palavra APAGAR.
+  async function apagarFotosDaObra() {
+    var obra = obraAtual();
+    if (!obra || !ehAdmin() || !S.online) { S.msg = "Só a administradora apaga fotos já enviadas, com internet."; render(); return; }
+    var regs = S.regs.filter(function (r) { return r.obra_id === obra.id; });
+    if (!regs.length) { S.msg = "Não há fotos enviadas nesta obra."; render(); return; }
+    var exp = lerExportadas(obra.id), faltam = regs.filter(function (r) { return !exp[r.id]; });
+    if (faltam.length) {
+      S.msg = "Trava de segurança: " + faltam.length + " de " + regs.length + " foto(s) ainda não estão em nenhum pacote baixado neste aparelho. Baixe o pacote (Exportar semana) e tente de novo.";
+      S.apagarTudo = false; render(); return;
+    }
+    S.apagando = "Apagando...";  render();
+    var ids = regs.map(function (r) { return r.id; }), caminhos = [];
+    regs.forEach(function (r) { if (r.foto_path) { caminhos.push(r.foto_path); caminhos.push(caminhoMini(r.foto_path)); } });
+    for (var i = 0; i < ids.length; i += 100) {
+      var d = await S.sb.from("registros").delete().in("id", ids.slice(i, i + 100));
+      if (d.error) { S.apagando = ""; S.msg = "Erro ao apagar: " + msgErro(d.error); render(); return; }
+    }
+    for (var j = 0; j < caminhos.length; j += 100) await S.sb.storage.from("fotos").remove(caminhos.slice(j, j + 100));
+    var set = {}; ids.forEach(function (x) { set[x] = 1; });
+    S.regs = S.regs.filter(function (x) { return !set[x.id]; });
+    await dbPut("cache", { k: "regs", v: S.regs });
+    for (var k = 0; k < ids.length; k++) {
+      await dbDel("minis", ids[k]); S.minis.delete(ids[k]);
+      if (S.edicoes[ids[k]]) { await dbDel("edicoes", ids[k]); delete S.edicoes[ids[k]]; }
+    }
+    guardado("exp_" + obra.id, "{}");
+    S.apagando = ""; S.apagarTudo = false;
+    S.msg = ids.length + " foto(s) apagada(s). Espaço liberado no app.";
+    render();
+  }
+
   function telaRegistros() {
     var itens = itensDaObra(), semanas = {};
     itens.forEach(function (it) { ((semanas[it.semana] = semanas[it.semana] || {})[it.dia] = semanas[it.semana][it.dia] || []).push(it); });
@@ -681,7 +723,29 @@
       h("div", { class: "linha", style: "margin-top:8px" },
         h("button", { class: "bt sec pe", disabled: S.sincronizando || !S.fila.length, onclick: function () { sincronizar(true); } },
           S.sincronizando ? "Enviando..." : (S.fila.length ? "Enviar agora (" + S.fila.length + ")" : "Tudo enviado"))),
-      itens.length ? blocos : h("p", { class: "mut" }, S.carregou || S.fila.length ? "Nenhuma foto nesta obra ainda." : "Aguardando carregar os dados da obra..."));
+      itens.length ? blocos : h("p", { class: "mut" }, S.carregou || S.fila.length ? "Nenhuma foto nesta obra ainda." : "Aguardando carregar os dados da obra..."),
+      blocoApagarVistoria());
+  }
+  // Fim da vistoria: só aparece para a administradora, dentro de cada obra (nada de central que apague várias de uma vez)
+  function blocoApagarVistoria() {
+    var obra = obraAtual();
+    if (!obra || !ehAdmin()) return null;
+    var regs = S.regs.filter(function (r) { return r.obra_id === obra.id; });
+    if (!regs.length) return null;
+    var mb = Math.round(regs.length * MB_POR_FOTO);
+    if (!S.apagarTudo) return h("div", { class: "cartao", style: "margin-top:16px" },
+      h("h2", {}, "Fim da vistoria"),
+      h("p", { class: "mut" }, "Depois de baixar o pacote e guardar no Drive, você pode apagar as " + regs.length + " fotos desta obra para liberar espaço (cerca de " + mb + " MB)."),
+      h("button", { class: "bt sec perigo", onclick: function () { S.apagarTudo = true; S.msg = ""; render(); } }, "Apagar todas as fotos desta vistoria"));
+    var inp = h("input", { type: "text", placeholder: "Digite APAGAR", autocapitalize: "characters", autocomplete: "off" });
+    var bt = h("button", { class: "bt perigo", disabled: true, onclick: function () { if (inp.value.trim().toUpperCase() === "APAGAR") apagarFotosDaObra(); } }, S.apagando || "Apagar definitivamente");
+    inp.oninput = function () { bt.disabled = inp.value.trim().toUpperCase() !== "APAGAR" || !!S.apagando; };
+    return h("div", { class: "cartao", style: "margin-top:16px" },
+      h("h2", {}, "Apagar todas as fotos desta vistoria"),
+      h("p", { class: "mut" }, "Serão apagadas " + regs.length + " foto(s) de " + obra.nome_exibicao + ", não há como desfazer. O app só permite se todas já estiverem em um pacote baixado neste aparelho. Os relatórios já gerados e o cadastro da obra continuam guardados."),
+      h("div", { class: "campo" }, inp),
+      h("div", { class: "linha" },
+        h("button", { class: "bt sec", onclick: function () { S.apagarTudo = false; render(); } }, "Cancelar"), bt));
   }
 
   function telaPainel() {
