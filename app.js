@@ -125,13 +125,24 @@
     var esc = Math.min(1, max / Math.max(w, h)), cw = Math.round(w * esc), ch = Math.round(h * esc);
     var c = document.createElement("canvas"); c.width = cw; c.height = ch;
     c.getContext("2d").drawImage(src, 0, 0, cw, ch);
-    return { blob: await toBlob(c, q), w: cw, h: ch };
+    var b = await toBlob(c, q);
+    c.width = 0; c.height = 0;                       // iPhone: libera a memória do canvas na hora
+    if (!b || !b.size) throw new Error("não foi possível reduzir a foto");
+    return { blob: b, w: cw, h: ch };
   }
   async function processar(file) {
     var src, w, hh;
     try { src = await createImageBitmap(file, { imageOrientation: "from-image" }); w = src.width; hh = src.height; }
     catch (e) { src = await carregarImg(file); w = src.naturalWidth; hh = src.naturalHeight; }
-    var grande = await reduzir(src, w, hh, 2000, 0.82), mini = await reduzir(src, w, hh, 360, 0.7), data = null;
+    var grande, mini;
+    try {
+      grande = await reduzir(src, w, hh, 2000, 0.82);
+      mini = await reduzir(src, w, hh, 360, 0.7);
+    } catch (e1) {                                   // tenta de novo menor, antes de desistir
+      grande = await reduzir(src, w, hh, 1400, 0.78);
+      mini = await reduzir(src, w, hh, 360, 0.7);
+    } finally { if (src && src.close) src.close(); }
+    var data = null;
     try { data = lerDataExif(await file.slice(0, 131072).arrayBuffer()); } catch (e) { /* ignora */ }
     if (!data) data = file.lastModified ? new Date(file.lastModified) : new Date();
     return { blob: grande.blob, thumb: mini.blob, w: grande.w, h: grande.h, data: data };
@@ -276,7 +287,7 @@
     if (!ses.data.session) { S.precisaLogin = true; render(); return; }
     S.sincronizando = true; render();
     try {
-      var fila = (await dbTodos("fila")).sort(function (a, b) { return new Date(a.ts) - new Date(b.ts); });
+      var fila = (await dbTodos("fila")).filter(function (x) { return x.estado !== "processando" && x.w; }).sort(function (a, b) { return new Date(a.ts) - new Date(b.ts); });
       for (var i = 0; i < fila.length; i++) {
         var it = fila[i], ref = S.fila.find(function (x) { return x.id === it.id; });
         if (ref) { ref.estado = "enviando"; render(); }
@@ -311,32 +322,80 @@
     var p = dia.split("-");
     return new Date(+p[0], +p[1] - 1, +p[2], data.getHours(), data.getMinutes(), data.getSeconds());
   }
+  // Os campos de foto ficam fora da tela que é redesenhada: se o app redesenhar enquanto a câmera do iPhone está
+  // aberta, um campo recriado perderia a foto tirada sem nenhum aviso.
+  var ENT = null;
+  function entradasFoto() {
+    if (!ENT) {
+      ENT = {
+        cam: h("input", { type: "file", accept: "image/*", capture: "environment", multiple: true, hidden: true, onchange: aoCapturar }),
+        gal: h("input", { type: "file", accept: "image/*", multiple: true, hidden: true, onchange: aoCapturar, "data-galeria": "1" })
+      };
+      document.body.append(ENT.cam, ENT.gal);
+    }
+    return ENT;
+  }
+  var filaProc = Promise.resolve();                  // uma foto de cada vez (memória do iPhone)
+  async function dataRapida(file) {
+    var d = null;
+    try { d = lerDataExif(await file.slice(0, 131072).arrayBuffer()); } catch (e) { /* ignora */ }
+    return d || (file.lastModified ? new Date(file.lastModified) : new Date());
+  }
+  // reduz a foto guardada; se falhar, o original continua guardado e a falha aparece no cartão
+  async function finalizarItem(it) {
+    try {
+      var f = await processar(it.blob);
+      var ref = S.fila.find(function (x) { return x.id === it.id; });
+      if (!ref) return true;
+      if (ref._u) { try { URL.revokeObjectURL(ref._u); } catch (e) { /* ok */ } ref._u = null; }
+      ref.blob = f.blob; ref.thumb = f.thumb; ref.w = f.w; ref.h = f.h; ref.estado = "pendente"; ref.erro = "";
+      await dbPut("fila", Object.assign({}, ref, { _u: undefined }));
+      return true;
+    } catch (e) {
+      var r2 = S.fila.find(function (x) { return x.id === it.id; });
+      if (r2) { r2.estado = "falha"; r2.erro = "Não foi possível preparar a foto: " + msgErro(e); await dbPut("fila", Object.assign({}, r2, { _u: undefined })); }
+      return false;
+    }
+  }
   async function aoCapturar(ev) {
     var arqs = Array.prototype.slice.call(ev.target.files || []);
     var diaForcado = ev.target.dataset && ev.target.dataset.galeria ? S.diaGal : "";
     ev.target.value = "";
     if (!arqs.length || !S.obraId) return;
+    var obraId = S.obraId, novosIds = [];
+    // 1) guarda o original de cada foto NA HORA, antes de qualquer processamento
     for (var i = 0; i < arqs.length; i++) {
-      S.msg = "Processando foto " + (i + 1) + " de " + arqs.length + "...";
-      render();
       try {
-        var f = await processar(arqs[i]);
-        if (diaForcado) f.data = dataNoDia(diaForcado, f.data);
-        var dia = diaDe(f.data);
+        var data = await dataRapida(arqs[i]);
+        if (diaForcado) data = dataNoDia(diaForcado, data);
+        var dia = diaDe(data);
         var item = {
-          id: novoId(), obra_id: S.obraId, dia: dia, ts: f.data.toISOString(), semana: diaDe(segundaDe(dia)),
-          local: "", legenda: "", sistema: "", diagnostico: "", orientacao: "", entra: true, blob: f.blob, thumb: f.thumb, w: f.w, h: f.h, estado: "pendente"
+          id: novoId(), obra_id: obraId, dia: dia, ts: data.toISOString(), semana: diaDe(segundaDe(dia)),
+          local: "", legenda: "", sistema: "", diagnostico: "", orientacao: "", entra: true, blob: arqs[i], thumb: arqs[i], w: 0, h: 0, estado: "processando"
         };
         await dbPut("fila", item);
-        S.fila.push(item);
-      } catch (e) { S.msg = "Falha ao processar a foto: " + msgErro(e); }
+        S.fila.push(item); novosIds.push(item.id);
+      } catch (e) { S.msg = "Não foi possível guardar uma das fotos: " + msgErro(e) + " Tire de novo."; }
     }
-    S.msg = "";
     if (diaForcado) { S.diaGal = ""; }
-    var novos = S.fila.filter(function (x) { return x.obra_id === S.obraId; }).sort(function (a, b) { return new Date(b.ts) - new Date(a.ts); });
+    var novos = S.fila.filter(function (x) { return x.obra_id === obraId; }).sort(function (a, b) { return new Date(b.ts) - new Date(a.ts); });
     S.novoId = novos[0] ? novos[0].id : null;
     render();
-    sincronizar();
+    // 2) reduz em segundo plano, uma por vez, e envia
+    novosIds.forEach(function (id) {
+      filaProc = filaProc.then(async function () {
+        var it = S.fila.find(function (x) { return x.id === id; });
+        if (it && it.estado === "processando") { await finalizarItem(it); render(); }
+      });
+    });
+    filaProc = filaProc.then(function () { sincronizar(); });
+  }
+  // se o app foi fechado no meio do processamento, retoma de onde parou
+  function retomarProcessamento() {
+    S.fila.filter(function (x) { return x.estado === "processando" || (x.estado === "falha" && !x.w); }).forEach(function (it) {
+      filaProc = filaProc.then(async function () { await finalizarItem(it); render(); });
+    });
+    filaProc = filaProc.then(function () { sincronizar(); });
   }
   var timersPush = {};
   function agendarPush(id) {          // envia a edição ao Supabase sem pressa; se falhar, a edição continua guardada no aparelho
@@ -563,7 +622,7 @@
   function cartaoRegistro(it) {
     var mini = it._pend ? null : S.minis.get(it.id);
     var url = it._pend ? (it._u = it._u || URL.createObjectURL(it.thumb)) : mini;
-    var tag = it._pend ? (it.estado === "falha" ? h("span", { class: "tag fal", title: it.erro || "" }, "Falha") : h("span", { class: "tag pen" }, it.estado === "enviando" ? "Enviando..." : "A enviar")) : h("span", { class: "tag env" }, "Enviada");
+    var tag = it._pend ? (it.estado === "falha" ? h("span", { class: "tag fal", title: it.erro || "" }, "Falha") : h("span", { class: "tag pen" }, it.estado === "processando" ? "Preparando..." : (it.estado === "enviando" ? "Enviando..." : "A enviar"))) : h("span", { class: "tag env" }, "Enviada");
     var cont = h("div", { class: "cont" }, (it.legenda || "").length + "/" + LIMITE_LEGENDA);
     var ta = h("textarea", {
       placeholder: "Legenda (toque no microfone do teclado para ditar)", maxlength: 400, value: it.legenda || "",
@@ -654,7 +713,7 @@
     var regs = S.regs.filter(function (r) { return r.obra_id === obra.id; });
     if (!regs.length) { S.msg = "Não há fotos enviadas nesta obra."; render(); return; }
     var exp = lerExportadas(obra.id), faltam = regs.filter(function (r) { return !exp[r.id]; });
-    if (faltam.length) {
+    if (faltam.length && !S.confirmouDrive) {
       S.msg = "Trava de segurança: " + faltam.length + " de " + regs.length + " foto(s) ainda não estão em nenhum pacote baixado neste aparelho. Baixe o pacote (Exportar semana) e tente de novo.";
       S.apagarTudo = false; render(); return;
     }
@@ -674,7 +733,7 @@
       if (S.edicoes[ids[k]]) { await dbDel("edicoes", ids[k]); delete S.edicoes[ids[k]]; }
     }
     guardado("exp_" + obra.id, "{}");
-    S.apagando = ""; S.apagarTudo = false;
+    S.apagando = ""; S.apagarTudo = false; S.confirmouDrive = false;
     S.msg = ids.length + " foto(s) apagada(s). Espaço liberado no app.";
     render();
   }
@@ -703,8 +762,7 @@
     SISTEMAS_BASE.forEach(function (x) { usados[x] = 1; });
     S.regs.concat(S.fila).forEach(function (r) { if (r.sistema) usados[r.sistema] = 1; });
     var dl = h("datalist", { id: "lista-sistemas" }, Object.keys(usados).sort().map(function (x) { return h("option", { value: x }); }));
-    var cam = h("input", { type: "file", accept: "image/*", capture: "environment", multiple: true, hidden: true, onchange: aoCapturar });
-    var gal = h("input", { type: "file", accept: "image/*", multiple: true, hidden: true, onchange: aoCapturar, "data-galeria": "1" });
+    var cam = entradasFoto().cam, gal = entradasFoto().gal;
     var inDiaGal = h("input", { type: "date", value: S.diaGal || "", max: diaDe(new Date()), onchange: function (e) { S.diaGal = e.target.value; } });
     var ob = obraAtual();
     return h("main", {},
@@ -715,7 +773,6 @@
       h("div", { class: "linha" },
         h("button", { class: "bt", onclick: function () { cam.click(); } }, "Tirar foto"),
         h("button", { class: "bt sec", onclick: function () { gal.click(); } }, "Da galeria")),
-      cam, gal,
       h("div", { class: "campo", style: "margin-top:8px" },
         h("label", {}, "Dia das fotos da galeria (opcional)"),
         inDiaGal,
@@ -736,16 +793,22 @@
     if (!S.apagarTudo) return h("div", { class: "cartao", style: "margin-top:16px" },
       h("h2", {}, "Fim da vistoria"),
       h("p", { class: "mut" }, "Depois de baixar o pacote e guardar no Drive, você pode apagar as " + regs.length + " fotos desta obra para liberar espaço (cerca de " + mb + " MB)."),
-      h("button", { class: "bt sec perigo", onclick: function () { S.apagarTudo = true; S.msg = ""; render(); } }, "Apagar todas as fotos desta vistoria"));
+      h("button", { class: "bt sec perigo", onclick: function () { S.apagarTudo = true; S.confirmouDrive = false; S.msg = ""; render(); } }, "Apagar todas as fotos desta vistoria"));
+    var exp = lerExportadas(obra.id), faltam = regs.filter(function (r) { return !exp[r.id]; }).length;
     var inp = h("input", { type: "text", placeholder: "Digite APAGAR", autocapitalize: "characters", autocomplete: "off" });
-    var bt = h("button", { class: "bt perigo", disabled: true, onclick: function () { if (inp.value.trim().toUpperCase() === "APAGAR") apagarFotosDaObra(); } }, S.apagando || "Apagar definitivamente");
-    inp.oninput = function () { bt.disabled = inp.value.trim().toUpperCase() !== "APAGAR" || !!S.apagando; };
+    var bt = h("button", { class: "bt perigo", disabled: true, onclick: function () { if (pronto()) apagarFotosDaObra(); } }, S.apagando || "Apagar definitivamente");
+    function pronto() { return inp.value.trim().toUpperCase() === "APAGAR" && (!faltam || !!S.confirmouDrive) && !S.apagando; }
+    inp.oninput = function () { bt.disabled = !pronto(); };
+    var chk = faltam ? h("label", { class: "chk", style: "display:block;margin:8px 0" },
+      h("input", { type: "checkbox", checked: !!S.confirmouDrive, onchange: function (e) { S.confirmouDrive = e.target.checked; bt.disabled = !pronto(); } }),
+      " Este aparelho não registrou o download de " + faltam + " foto(s) (pode ter sido baixado antes desta versão ou em outro aparelho). Confirmo que o pacote com todas as fotos desta obra já está salvo no Drive.") : null;
     return h("div", { class: "cartao", style: "margin-top:16px" },
       h("h2", {}, "Apagar todas as fotos desta vistoria"),
       h("p", { class: "mut" }, "Serão apagadas " + regs.length + " foto(s) de " + obra.nome_exibicao + ", não há como desfazer. O app só permite se todas já estiverem em um pacote baixado neste aparelho. Os relatórios já gerados e o cadastro da obra continuam guardados."),
+      chk,
       h("div", { class: "campo" }, inp),
       h("div", { class: "linha" },
-        h("button", { class: "bt sec", onclick: function () { S.apagarTudo = false; render(); } }, "Cancelar"), bt));
+        h("button", { class: "bt sec", onclick: function () { S.apagarTudo = false; S.confirmouDrive = false; render(); } }, "Cancelar"), bt));
   }
 
   function telaPainel() {
@@ -1562,6 +1625,7 @@
   async function iniciar() {
     try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e0) { /* sem suporte */ }   // pede ao navegador para não apagar fotos e textos guardados no aparelho
     await carregarLocal();
+    setTimeout(retomarProcessamento, 1500);
     var hsh = (location.hash || "").replace("#/", "");
     if (hsh && tituloDe(hsh)) S.aba = hsh;
     try {
