@@ -362,12 +362,16 @@
     var diaForcado = ev.target.dataset && ev.target.dataset.galeria ? S.diaGal : "";
     ev.target.value = "";
     if (!arqs.length || !S.obraId) return;
-    var obraId = S.obraId, novosIds = [];
+    var obraId = S.obraId, novosIds = [], tsAnt = 0;
     // 1) guarda o original de cada foto NA HORA, antes de qualquer processamento
     for (var i = 0; i < arqs.length; i++) {
       try {
         var data = await dataRapida(arqs[i]);
         if (diaForcado) data = dataNoDia(diaForcado, data);
+        // a ordem escolhida vale: se a hora lida da foto não for maior que a da anterior (fotos sem data, ou com a data do
+        // carregamento), a foto fica 1 segundo depois da anterior. Assim o lote entra na ordem em que foi selecionado.
+        if (i > 0 && data.getTime() <= tsAnt) data = new Date(tsAnt + 1000);
+        tsAnt = data.getTime();
         var dia = diaDe(data);
         var item = {
           id: novoId(), obra_id: obraId, dia: dia, ts: data.toISOString(), semana: diaDe(segundaDe(dia)),
@@ -425,6 +429,75 @@
     if (r) Object.assign(r, campos);
     await guardarEdicao(it.id, campos);
     agendarPush(it.id);
+  }
+  // ---- ordem das fotos: a ordem do relatório é a hora (ts) da foto; reordenar = ajustar a hora entre as vizinhas
+  function calcularTs(cron, idMovido) {                 // cron: fotos do dia em ordem cronológica, já com a foto no novo lugar
+    var t = cron.map(function (x) { return new Date(x.ts).getTime(); }), p = cron.findIndex(function (x) { return x.id === idMovido; }), res = {};
+    var lo = p > 0 ? t[p - 1] : null, hi = p < cron.length - 1 ? t[p + 1] : null, novo;
+    if (lo !== null && hi !== null) novo = hi - lo >= 2 ? lo + Math.floor((hi - lo) / 2) : null;
+    else if (lo !== null) novo = lo + 1000;
+    else if (hi !== null) novo = hi - 1000;
+    else novo = t[p];
+    if (novo !== null) { if (novo !== t[p]) res[idMovido] = new Date(novo).toISOString(); return res; }
+    var base = Math.min.apply(null, t);                 // sem espaço entre as vizinhas: refaz a sequência, de 1 em 1 segundo
+    cron.forEach(function (x, i) { var v = base + i * 1000; if (v !== t[i]) res[x.id] = new Date(v).toISOString(); });
+    return res;
+  }
+  function fotosDoDia(dia) { return itensDaObra().filter(function (x) { return x.dia === dia; }).reverse(); }   // mais recente primeiro, como na tela
+  async function moverFoto(id, dia, novoIdx) {
+    var vis = fotosDoDia(dia), i = vis.findIndex(function (x) { return x.id === id; });
+    if (i < 0) return;
+    novoIdx = Math.max(0, Math.min(vis.length - 1, novoIdx));
+    if (i === novoIdx) return;
+    var it = vis.splice(i, 1)[0]; vis.splice(novoIdx, 0, it);
+    var cron = vis.slice().reverse(), mud = calcularTs(cron, id);
+    for (var k = 0; k < cron.length; k++) if (mud[cron[k].id]) await editarCampo(cron[k], { ts: mud[cron[k].id] });
+    S.novoId = id;
+    render();
+    if (S.online) sincronizar();
+  }
+  var ARR = null;
+  function iniciarArraste(e, it) {
+    var card = document.getElementById("reg-" + it.id);
+    if (!card || ARR) return;
+    e.preventDefault();
+    var cartas = Array.prototype.slice.call(document.querySelectorAll('.cartao.reg[data-dia="' + it.dia + '"]'));
+    ARR = { it: it, card: card, cartas: cartas, y0: e.clientY, sc0: window.scrollY, y: e.clientY, de: cartas.indexOf(card), alvo: cartas.indexOf(card), raf: 0 };
+    S.arrastando = true; card.classList.add("arrastando");
+    try { e.target.setPointerCapture(e.pointerId); } catch (x) { /* ok */ }
+    window.addEventListener("pointermove", moverArraste, { passive: false });
+    window.addEventListener("pointerup", soltarArraste);
+    window.addEventListener("pointercancel", soltarArraste);
+    quadroArraste();
+  }
+  function moverArraste(e) { if (ARR) { ARR.y = e.clientY; e.preventDefault(); } }
+  function quadroArraste() {
+    var st = ARR; if (!st) return;
+    if (st.y < 90) window.scrollBy(0, -14); else if (st.y > window.innerHeight - 90) window.scrollBy(0, 14);   // rola perto da borda
+    st.card.style.transform = "translateY(" + (st.y - st.y0 + (window.scrollY - st.sc0)) + "px)";
+    var r = st.card.getBoundingClientRect(), centro = r.top + r.height / 2;
+    var outros = st.cartas.filter(function (c) { return c !== st.card; }), alvo = 0;
+    outros.forEach(function (c) { var q = c.getBoundingClientRect(); if (q.top + q.height / 2 < centro) alvo++; });
+    st.alvo = alvo;
+    outros.forEach(function (c, k) { c.classList.toggle("ins-antes", k === alvo); c.classList.toggle("ins-depois", alvo === outros.length && k === outros.length - 1); });
+    st.raf = requestAnimationFrame(quadroArraste);
+  }
+  function soltarArraste(e) {
+    var st = ARR; if (!st) return;
+    cancelAnimationFrame(st.raf); ARR = null; S.arrastando = false;
+    window.removeEventListener("pointermove", moverArraste);
+    window.removeEventListener("pointerup", soltarArraste);
+    window.removeEventListener("pointercancel", soltarArraste);
+    st.card.style.transform = ""; st.card.classList.remove("arrastando");
+    st.cartas.forEach(function (c) { c.classList.remove("ins-antes", "ins-depois"); });
+    if (e && e.type === "pointerup" && st.alvo !== st.de) moverFoto(st.it.id, st.it.dia, st.alvo); else render();
+  }
+  function controleOrdem(it) {
+    var vis = fotosDoDia(it.dia), i = vis.findIndex(function (x) { return x.id === it.id; });
+    return h("span", { class: "ord" },
+      h("button", { class: "bt sec pe", title: "Subir", disabled: i <= 0, onclick: function () { moverFoto(it.id, it.dia, i - 1); } }, "▲"),
+      h("button", { class: "bt sec pe", title: "Descer", disabled: i < 0 || i >= vis.length - 1, onclick: function () { moverFoto(it.id, it.dia, i + 1); } }, "▼"),
+      h("span", { class: "alca", title: "Segure e arraste para mudar a ordem", onpointerdown: function (e) { iniciarArraste(e, it); } }, "⠿"));
   }
   async function moverParaDia(itens, novoDia) {
     if (!novoDia) { S.msg = "Escolha o novo dia antes de mover."; render(); return; }
@@ -633,10 +706,10 @@
       onblur: function (e) { editarCampo(it, "legenda", e.target.value); }
     });
     var chave = "rm" + it.id;
-    return h("div", { class: "cartao reg", id: "reg-" + it.id },
+    return h("div", { class: "cartao reg", id: "reg-" + it.id, "data-dia": it.dia },
       url ? h("img", { class: "mini", src: url, alt: "Foto", onclick: function () { abrirVisor(it); } }) : h("div", { class: "mini", onclick: function () { abrirVisor(it); } }, "foto"),
       h("div", {},
-        h("div", { class: "meta" }, hora(it.ts), tag, it.estado === "falha" && it.erro ? h("span", { class: "erro" }, it.erro) : null),
+        h("div", { class: "meta" }, hora(it.ts), tag, it.estado === "falha" && it.erro ? h("span", { class: "erro" }, it.erro) : null, controleOrdem(it)),
         h("input", {
           type: "text", placeholder: "Pavimento ou local (ex.: Térreo, 1º pavimento, torre B)", value: it.local || "", "aria-label": "Local",
           oninput: function (e) { editarCampo(it, "local", e.target.value); },
@@ -1566,6 +1639,7 @@
   }
 
   function render() {
+    if (S.arrastando) { pendRender = true; return; }           // não redesenha no meio de um arrasto de foto
     var a = document.activeElement;
     if (a && /^(TEXTAREA|INPUT|SELECT)$/.test(a.tagName) && app.contains(a) && a.type !== "checkbox" && a.type !== "file") { pendRender = true; return; }
     pendRender = false;

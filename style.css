@@ -118,3 +118,11 @@ header .tit{flex:1}
 .cartao.reg.novo{outline:3px solid var(--acc);outline-offset:-1px}
 /* campos de data no iPhone: não passam da largura da tela */
 .campo input[type=date]{display:block;width:100%;max-width:100%;min-width:0;box-sizing:border-box;min-height:40px;-webkit-appearance:none;appearance:none}
+
+/* ordem das fotos: subir, descer e arrastar */
+.ord{margin-left:auto;display:flex;gap:6px;align-items:center}
+.ord .bt{padding:2px 9px;font-size:13px;min-width:34px}
+.alca{touch-action:none;cursor:grab;user-select:none;-webkit-user-select:none;font-size:20px;line-height:1;padding:4px 8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--mut)}
+.cartao.reg.arrastando{position:relative;z-index:30;box-shadow:0 12px 30px rgba(0,0,0,.35);outline:3px solid var(--acc);opacity:.96}
+.cartao.reg.ins-antes{box-shadow:0 -5px 0 0 var(--acc)}
+.cartao.reg.ins-depois{box-shadow:0 5px 0 0 var(--acc)}
