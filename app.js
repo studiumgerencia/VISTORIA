@@ -1539,39 +1539,87 @@
     } catch (e) { S.msg = "Erro ao alterar a situação: " + msgErro(e); }
     render();
   }
+  // apaga relatórios, arquivos de cadastro e as obras (as fotos já precisam ter sido apagadas)
+  async function removerObras(obras) {
+    var ids = obras.map(function (o) { return o.id; }), tira = [];
+    obras.forEach(function (o) {
+      [o.imagem_capa, o.imagem_mapa, (o.ficha || {}).logo_path, (o.ficha || {}).fig1_path, (o.ficha || {}).fig2_path].forEach(function (p) { if (p) tira.push(p); });
+    });
+    for (var k = 0; k < ids.length; k++) {
+      try {
+        var ls = await S.sb.storage.from("fotos").list("obras/" + ids[k]);
+        (ls.data || []).forEach(function (f) { tira.push("obras/" + ids[k] + "/" + f.name); });
+      } catch (e0) { /* segue */ }
+    }
+    if (ids.length) {
+      var d1 = await S.sb.from("relatorios").delete().in("obra_id", ids); if (d1.error) throw d1.error;
+      var d2 = await S.sb.from("obras").delete().in("id", ids); if (d2.error) throw d2.error;
+    }
+    try { if (tira.length) await S.sb.storage.from("fotos").remove(tira.filter(function (p) { return p && p.indexOf("/") > 0; })); } catch (e1) { /* arquivos soltos não travam */ }
+    ids.forEach(function (id) { guardado("exp_" + id, ""); });
+    if (ids.indexOf(S.obraId) >= 0) { S.obraId = null; guardado("obra", ""); }
+  }
+  function erroExcluir(e) {
+    return "Não foi possível excluir: " + msgErro(e) + (/policy|permission|denied|row-level/i.test(msgErro(e)) ? " (falta rodar o script 06 no Supabase)" : "");
+  }
   async function excluirCliente(c) {
     if (exigeOnline()) return;
-    var obras = S.obras.filter(function (o) { return o.cliente_id === c.id; }), ids = obras.map(function (o) { return o.id; });
+    var obras = S.obras.filter(function (o) { return o.cliente_id === c.id; });
     if (!ehAdmin()) { S.msg = "Só a administradora exclui clientes."; render(); return; }
     if (fotosDoCliente(obras)) { S.msg = "Apague antes todas as fotos das obras deste cliente."; render(); return; }
     S.apagando = "Excluindo..."; render();
     try {
-      var tira = [];                                                   // arquivos do cadastro (capa, mapa, logo, figuras)
-      obras.forEach(function (o) {
-        [o.imagem_capa, o.imagem_mapa, (o.ficha || {}).logo_path, (o.ficha || {}).fig1_path, (o.ficha || {}).fig2_path].forEach(function (p) { if (p) tira.push(p); });
-      });
-      if (c.logo_path) tira.push(c.logo_path);
-      for (var k = 0; k < ids.length; k++) {
-        try {
-          var ls = await S.sb.storage.from("fotos").list("obras/" + ids[k]);
-          (ls.data || []).forEach(function (f) { tira.push("obras/" + ids[k] + "/" + f.name); });
-        } catch (e0) { /* segue */ }
-      }
-      if (ids.length) {
-        var d1 = await S.sb.from("relatorios").delete().in("obra_id", ids); if (d1.error) throw d1.error;
-        var d2 = await S.sb.from("obras").delete().in("id", ids); if (d2.error) throw d2.error;
-      }
+      await removerObras(obras);
       var d3 = await S.sb.from("clientes").delete().eq("id", c.id); if (d3.error) throw d3.error;
-      try { if (tira.length) await S.sb.storage.from("fotos").remove(tira.filter(function (p) { return p && p.indexOf("/") > 0; })); } catch (e1) { /* arquivos soltos não travam */ }
-      ids.forEach(function (id) { guardado("exp_" + id, ""); });
-      S.clienteSel = null; S.obraSel = null; if (ids.indexOf(S.obraId) >= 0) { S.obraId = null; guardado("obra", ""); }
-      S.apagando = ""; S.msg = "Cliente " + c.razao_social + " excluído, com " + ids.length + " obra(s).";
+      if (c.logo_path) { try { await S.sb.storage.from("fotos").remove([c.logo_path]); } catch (e2) { /* ok */ } }
+      S.clienteSel = null; S.obraSel = null; S.apagando = "";
+      S.msg = "Cliente " + c.razao_social + " excluído, com " + obras.length + " obra(s).";
       await carregarNuvem();
-    } catch (e) {
-      S.apagando = "";
-      S.msg = "Não foi possível excluir: " + msgErro(e) + (/policy|permission|denied|row-level/i.test(msgErro(e)) ? " (falta rodar o script 06 no Supabase)" : "");
-    }
+    } catch (e) { S.apagando = ""; S.msg = erroExcluir(e); }
     render();
+  }
+  // ---- situação de cada obra do cliente: ativa, inativa (paralisada) ou excluída
+  async function definirObraInativa(o, inativo) {
+    if (exigeOnline()) return;
+    try {
+      var r = await S.sb.from("obras").update({ ativa: !inativo }).eq("id", o.id); if (r.error) throw r.error;
+      S.msg = inativo ? "Obra marcada como inativa: saiu do app de campo e do painel; nada foi apagado." : "Obra reativada.";
+      await carregarNuvem();
+    } catch (e) { S.msg = "Erro ao alterar a situação: " + msgErro(e); }
+    render();
+  }
+  async function excluirObra(o) {
+    if (exigeOnline()) return;
+    if (!ehAdmin()) { S.msg = "Só a administradora exclui obras."; render(); return; }
+    if (fotosDoCliente([o])) { S.msg = "Apague antes todas as fotos desta obra."; render(); return; }
+    S.apagando = "Excluindo..."; render();
+    try {
+      await removerObras([o]);
+      S.obraSel = null; S.apagando = ""; S.msg = "Obra " + o.nome_exibicao + " excluída.";
+      await carregarNuvem();
+    } catch (e) { S.apagando = ""; S.msg = erroExcluir(e); }
+    render();
+  }
+  function blocoSituacaoObra(o) {
+    if (!ehAdmin()) return null;
+    var inativa = o.ativa === false, nf = fotosDoCliente([o]), nrel = S.relatorios.filter(function (r) { return r.obra_id === o.id; }).length, chave = "inato" + o.id;
+    var inp = h("input", { type: "text", placeholder: "Digite EXCLUIR", autocapitalize: "characters", autocomplete: "off" });
+    var bt = h("button", { class: "bt perigo", disabled: true, onclick: function () { if (inp.value.trim().toUpperCase() === "EXCLUIR" && !S.apagando) excluirObra(o); } }, S.apagando || "Excluir obra definitivamente");
+    inp.oninput = function () { bt.disabled = inp.value.trim().toUpperCase() !== "EXCLUIR" || !!S.apagando; };
+    return h("div", {},
+      h("div", { class: "cartao", style: "margin-top:16px" },
+        h("h2", {}, "Situação da obra"),
+        h("p", { class: "mut" }, inativa
+          ? "Esta obra está inativa: não aparece no app de campo nem no painel. Tudo continua guardado."
+          : "Use Inativa quando esta obra estiver paralisada e puder ser retomada: ela sai do app de campo e do painel, e nada é apagado. As outras obras do cliente não mudam."),
+        h("button", { class: "bt sec", onclick: function () { confirmar(chave, function () { definirObraInativa(o, !inativa); }); } },
+          S.confirmar === chave ? "Confirmar?" : (inativa ? "Reativar obra" : "Marcar obra como inativa"))),
+      h("div", { class: "cartao", style: "margin-top:16px" },
+        h("h2", {}, "Excluir obra"),
+        nf ? h("p", { class: "mut" }, "Para excluir, apague antes as " + nf + " foto(s) desta obra: em Vistoria, abra a obra e use \"Apagar todas as fotos desta vistoria\" (fim da tela). Depois volte aqui.")
+          : h("p", { class: "mut" }, "Para obras de consultoria pontual ou contrato encerrado, sem retorno previsto. Serão excluídos o cadastro da obra" + (nrel ? " e " + nrel + " relatório(s) gerado(s) no app" : "") + ". Não há como desfazer. O cliente e as outras obras dele não são afetados, e o que você guardou no Drive também não."),
+        nf ? null : h("div", { class: "campo" }, inp),
+        nf ? null : bt));
   }
   function blocoSituacaoCliente(c, obras) {
     if (!ehAdmin()) return null;
@@ -1660,7 +1708,8 @@
           h("div", { class: "campo" }, h("label", {}, "Logo da empresa, PNG (atual: " + (fi.logo_path ? "enviado" : "nenhum") + ")"), fLogo),
           h("div", { class: "campo" }, h("label", {}, "Figura 1 do item 1, ex.: GeoPortal (atual: " + (fi.fig1_path ? "enviada" : "nenhuma") + ")"), fFig1),
           h("div", { class: "campo" }, h("label", {}, "Figura 2 do item 1, vista aérea (atual: " + (fi.fig2_path ? "enviada" : "nenhuma") + ")"), fFig2)) : null,
-        h("button", { class: "bt", onclick: salvar }, "Salvar obra")));
+        h("button", { class: "bt", onclick: salvar }, "Salvar obra")),
+      novo ? null : blocoSituacaoObra(o));
   }
 
   // ---------------------------------------------------------------- usuários
