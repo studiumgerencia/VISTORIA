@@ -178,7 +178,7 @@
     c = await dbGet("cache", "modelos"); if (c) S.modelos = c.v;
     c = await dbGet("cache", "relatorios"); if (c) S.relatorios = c.v;
     (await dbTodos("minis")).forEach(function (m) { S.minis.set(m.id, URL.createObjectURL(m.blob)); });
-    S.temTipo = guardado("temTipo") === "1"; S.temFicha = guardado("temFicha") === "1";
+    S.temAtivoCli = guardado("temAtivoCli") === "1"; S.temTipo = guardado("temTipo") === "1"; S.temFicha = guardado("temFicha") === "1";
     S.tipoSel = guardado("tipoSel") || null;
     var guardada = guardado("obra");
     S.obraId = (S.obras.some(function (o) { return o.id === guardada; }) ? guardada : (S.obras[0] && S.obras[0].id)) || null;
@@ -206,6 +206,7 @@
       var clientes = await paginar(function () { return S.sb.from("clientes").select("*").order("razao_social"); });
       var perfis = await paginar(function () { return S.sb.from("perfis").select("*").order("email"); });
       S.obras = obras; S.perfil = perfil.data || S.perfil; S.regs = regs; S.clientes = clientes; S.perfis = perfis;
+      try { var sonda3 = await S.sb.from("clientes").select("ativo").limit(1); S.temAtivoCli = !sonda3.error; guardado("temAtivoCli", S.temAtivoCli ? "1" : "0"); } catch (e3) { S.temAtivoCli = false; }
       try { var sonda = await S.sb.from("obras").select("tipo_vistoria").limit(1); S.temTipo = !sonda.error; } catch (e0) { S.temTipo = false; }
       guardado("temTipo", S.temTipo ? "1" : "0");
       try { var sonda2 = await S.sb.from("obras").select("ficha").limit(1); S.temFicha = !sonda2.error; guardado("temFicha", S.temFicha ? "1" : "0"); } catch (e1) { S.temFicha = false; }
@@ -1459,7 +1460,10 @@
   function telaClientes() {
     if (S.obraSel) return telaObra();
     if (S.clienteSel) return telaCliente();
-    var lista = S.clientes.slice().sort(function (a, b) { return a.razao_social.localeCompare(b.razao_social); });
+    var lista = S.clientes.slice().sort(function (a, b) {
+      var ia = clienteInativo(a) ? 1 : 0, ib = clienteInativo(b) ? 1 : 0;
+      return ia - ib || a.razao_social.localeCompare(b.razao_social);
+    });
     return h("main", {},
       S.msg ? h("div", { class: "aviso" }, S.msg) : null,
       h("div", { class: "linha" }, h("h2", {}, "Clientes de vistoria"), h("button", { class: "bt pe", style: "flex:0 0 auto", onclick: function () { S.clienteSel = "novo"; S.msg = ""; render(); } }, "Novo cliente")),
@@ -1467,7 +1471,7 @@
         var obras = S.obras.filter(function (o) { return o.cliente_id === c.id; });
         return h("div", { class: "cartao cli", onclick: function () { S.clienteSel = c.id; S.msg = ""; render(); } },
           S.logos[c.logo_path] ? h("img", { class: "logo-c", src: S.logos[c.logo_path], alt: "" }) : h("div", { class: "logo-c ini" }, c.razao_social.slice(0, 1)),
-          h("div", {}, h("strong", {}, c.razao_social), h("div", { class: "mut" }, [c.documento, c.contato_nome].filter(Boolean).join(" | ")),
+          h("div", {}, h("strong", {}, c.razao_social), clienteInativo(c) ? h("span", { class: "tag pen", style: "margin-left:6px" }, "Inativo") : null, h("div", { class: "mut" }, [c.documento, c.contato_nome].filter(Boolean).join(" | ")),
             h("div", { class: "mut" }, obras.length + (obras.length === 1 ? " obra" : " obras") + (obras.length ? ": " + obras.map(function (o) { return o.nome_exibicao; }).join(", ") : ""))));
       }) : h("p", { class: "mut" }, "Nenhum cliente cadastrado."));
   }
@@ -1509,7 +1513,88 @@
         obras.length ? obras.map(function (o) {
           return h("div", { class: "cli", onclick: function () { S.obraSel = o.id; S.msg = ""; render(); } },
             h("div", {}, h("strong", {}, o.nome_exibicao), h("div", { class: "mut" }, [o.numero_contrato ? "Contrato " + o.numero_contrato : "", o.periodicidade, o.ativa === false ? "inativa" : ""].filter(Boolean).join(" | "))));
-        }) : h("p", { class: "mut" }, "Nenhuma obra cadastrada para este cliente.")));
+        }) : h("p", { class: "mut" }, "Nenhuma obra cadastrada para este cliente.")),
+      novo ? null : blocoSituacaoCliente(c, obras));
+  }
+
+  // ---------------------------------------------------------------- situação do cliente: inativo (pausa) e exclusão
+  // Inativo: esconde o cliente e as obras dele do app de campo e do painel, sem apagar nada (obra paralisada, que pode voltar).
+  // Excluir: só administradora e só depois de apagar todas as fotos das obras do cliente (consultoria pontual encerrada).
+  function clienteInativo(c, obras) {
+    obras = obras || S.obras.filter(function (o) { return o.cliente_id === c.id; });
+    return c.ativo === false || (obras.length > 0 && obras.every(function (o) { return o.ativa === false; }));
+  }
+  function fotosDoCliente(obras) {
+    var ids = {}; obras.forEach(function (o) { ids[o.id] = 1; });
+    return S.regs.filter(function (r) { return ids[r.obra_id]; }).length + S.fila.filter(function (p) { return ids[p.obra_id]; }).length;
+  }
+  async function definirClienteInativo(c, inativo) {
+    if (exigeOnline()) return;
+    var ids = S.obras.filter(function (o) { return o.cliente_id === c.id; }).map(function (o) { return o.id; });
+    try {
+      if (S.temAtivoCli) { var r = await S.sb.from("clientes").update({ ativo: !inativo }).eq("id", c.id); if (r.error) throw r.error; }
+      if (ids.length) { var r2 = await S.sb.from("obras").update({ ativa: !inativo }).in("id", ids); if (r2.error) throw r2.error; }
+      S.msg = inativo ? "Cliente marcado como inativo. Ele e as obras dele saíram do app de campo e do painel; nada foi apagado." : "Cliente reativado, com todas as obras dele.";
+      await carregarNuvem();
+    } catch (e) { S.msg = "Erro ao alterar a situação: " + msgErro(e); }
+    render();
+  }
+  async function excluirCliente(c) {
+    if (exigeOnline()) return;
+    var obras = S.obras.filter(function (o) { return o.cliente_id === c.id; }), ids = obras.map(function (o) { return o.id; });
+    if (!ehAdmin()) { S.msg = "Só a administradora exclui clientes."; render(); return; }
+    if (fotosDoCliente(obras)) { S.msg = "Apague antes todas as fotos das obras deste cliente."; render(); return; }
+    S.apagando = "Excluindo..."; render();
+    try {
+      var tira = [];                                                   // arquivos do cadastro (capa, mapa, logo, figuras)
+      obras.forEach(function (o) {
+        [o.imagem_capa, o.imagem_mapa, (o.ficha || {}).logo_path, (o.ficha || {}).fig1_path, (o.ficha || {}).fig2_path].forEach(function (p) { if (p) tira.push(p); });
+      });
+      if (c.logo_path) tira.push(c.logo_path);
+      for (var k = 0; k < ids.length; k++) {
+        try {
+          var ls = await S.sb.storage.from("fotos").list("obras/" + ids[k]);
+          (ls.data || []).forEach(function (f) { tira.push("obras/" + ids[k] + "/" + f.name); });
+        } catch (e0) { /* segue */ }
+      }
+      if (ids.length) {
+        var d1 = await S.sb.from("relatorios").delete().in("obra_id", ids); if (d1.error) throw d1.error;
+        var d2 = await S.sb.from("obras").delete().in("id", ids); if (d2.error) throw d2.error;
+      }
+      var d3 = await S.sb.from("clientes").delete().eq("id", c.id); if (d3.error) throw d3.error;
+      try { if (tira.length) await S.sb.storage.from("fotos").remove(tira.filter(function (p) { return p && p.indexOf("/") > 0; })); } catch (e1) { /* arquivos soltos não travam */ }
+      ids.forEach(function (id) { guardado("exp_" + id, ""); });
+      S.clienteSel = null; S.obraSel = null; if (ids.indexOf(S.obraId) >= 0) { S.obraId = null; guardado("obra", ""); }
+      S.apagando = ""; S.msg = "Cliente " + c.razao_social + " excluído, com " + ids.length + " obra(s).";
+      await carregarNuvem();
+    } catch (e) {
+      S.apagando = "";
+      S.msg = "Não foi possível excluir: " + msgErro(e) + (/policy|permission|denied|row-level/i.test(msgErro(e)) ? " (falta rodar o script 06 no Supabase)" : "");
+    }
+    render();
+  }
+  function blocoSituacaoCliente(c, obras) {
+    if (!ehAdmin()) return null;
+    var inativo = clienteInativo(c, obras), nf = fotosDoCliente(obras), nrel = S.relatorios.filter(function (r) { return obras.some(function (o) { return o.id === r.obra_id; }); }).length;
+    var chave = "inat" + c.id;
+    var inp = h("input", { type: "text", placeholder: "Digite EXCLUIR", autocapitalize: "characters", autocomplete: "off" });
+    var bt = h("button", { class: "bt perigo", disabled: true, onclick: function () { if (inp.value.trim().toUpperCase() === "EXCLUIR" && !S.apagando) excluirCliente(c); } }, S.apagando || "Excluir cliente definitivamente");
+    inp.oninput = function () { bt.disabled = inp.value.trim().toUpperCase() !== "EXCLUIR" || !!S.apagando; };
+    return h("div", {},
+      h("div", { class: "cartao", style: "margin-top:16px" },
+        h("h2", {}, "Situação do cliente"),
+        h("p", { class: "mut" }, inativo
+          ? "Este cliente está inativo: ele e as obras dele não aparecem no app de campo nem no painel. Tudo continua guardado."
+          : "Use Inativo quando a obra estiver paralisada e puder ser retomada: o cliente e as obras saem do app de campo e do painel, e nada é apagado."),
+        !S.temAtivoCli ? h("p", { class: "mut" }, "Dica: rode o script 06 no Supabase para o app guardar também o status do cliente sem obras.") : null,
+        h("button", { class: "bt sec", onclick: function () { confirmar(chave, function () { definirClienteInativo(c, !inativo); }); } },
+          S.confirmar === chave ? "Confirmar?" : (inativo ? "Reativar cliente" : "Marcar cliente como inativo"))),
+      h("div", { class: "cartao", style: "margin-top:16px" },
+        h("h2", {}, "Excluir cliente"),
+        nf ? h("p", { class: "mut" }, "Para excluir, apague antes as " + nf + " foto(s) das obras deste cliente: em Vistoria, abra a obra e use \"Apagar todas as fotos desta vistoria\" (fim da tela). Depois volte aqui.")
+          : h("p", { class: "mut" }, "Para clientes de consultoria pontual ou contratos encerrados, sem retorno previsto. Serão excluídos o cadastro do cliente, " + obras.length + " obra(s)" + (nrel ? " e " + nrel + " relatório(s) gerado(s) no app" : "") + ". Não há como desfazer. Os arquivos que você guardou no Drive não são afetados."),
+        nf ? null : h("div", { class: "campo" }, inp),
+        nf ? null : bt));
   }
 
   function telaObra() {
